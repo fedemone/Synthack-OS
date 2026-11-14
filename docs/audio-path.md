@@ -8,7 +8,7 @@ Blocks of **32 frames at 48 kHz** (0.67 ms).
 - Per block: copies `0x1B0` B of parameters from shared RAM, renders **8 digital voices** with `0x40004324`, sends 8 × 32 × int32 (1 KB) back via **eDMA ch. 47**. No mixing here.
 - 12 engines: tables at `0x400148F0` (render), `0x40014920` (update), `0x40014950` (machine ID → engine).
   0 BD MODERN · 1 SD BASIC · 2 CY ALLOY · 3 PC CARBON · 4 SY TONE · 5 SY CHORD · 6 SD VINTAGE · 7 CP VINTAGE · 8 SY TOY · 9 SY BITS · 10 SY SWARM · 11 SP TWINSHOT.
-- SY CHORD reads a 512 × int32 single-cycle wave at `0x4001A300`.
+- SY CHORD reads a **32-frame wave bank**, WAVE = 4 × frame, values in between interpolated. Frame 0 is a sine shared with other machines at `0x40054250`. Frames 1–31 are 257 × int32 each (256 samples + guard, peak `0x7FFF0000`, sample 0 = 0), stored in reverse: frame k at `0x4001E7FC − k·0x404`, bank `0x40016B80–0x4001E7FC`. Source: [syntakt-firmware-workbench](https://github.com/Bezronczek/syntakt-firmware-workbench) (MIT), measured on hardware. An earlier note here said "512 × int32 at `0x4001A300`": that address is inside frames 16–18.
 
 ## CPU #1 — mix and output (section 3)
 

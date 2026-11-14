@@ -256,6 +256,11 @@ def main(argv: list[str] | None = None) -> int:
         preview(list(tables), tables, a.out, a.chord, a.root)
         return 0
 
+    raise SystemExit(
+        "build disattivato: SY CHORD non ha UNA tabella da 512 a 0x4001A300 ma un banco di 32 frame\n"
+        "(frame 0 = seno condiviso a 0x40054250; frame 1..31 = 257 x int32, 0x404 B ciascuno, al contrario,\n"
+        "fino a 0x4001E7FC; WAVE = 4 x frame, interpolato). 0x4001A300 cade dentro i frame 16-18 (WAVE 64-72).\n"
+        "Fonte: syntakt-firmware-workbench (Bezronczek, MIT), misurato su hardware. La patch va rifatta.")
     if stock_table is None:
         raise SystemExit(f"{a.stock}: serve l'OS stock 1.41 (vedi firmware/README.md)")
     print("tabelle a 512 x int32 vicino all'onda di SY CHORD:")

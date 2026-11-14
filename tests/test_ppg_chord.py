@@ -163,6 +163,7 @@ def test_wavetable_parser_and_slots(tmp_path):
         waves.from_ppg_table(f, 0, 61)
 
 
+@pytest.mark.skip(reason="build disattivato finche' la patch non segue il banco a 32 frame")
 def test_cli_ppg_table_patch(tmp_path, monkeypatch):
     f, _ = synthetic_rom(tmp_path)
     monkeypatch.setattr(mp, "load_section7", lambda _: fake_section7(stock_like()))
