@@ -139,7 +139,7 @@ def synthetic_rom(tmp_path, n_waves=8):
     rom[5] = np.full(64, 128)                                     # onda vuota
     rom[6] = rom[1]                                               # duplicato
     # tabella 0: chiavi 0->1, 30->2, 60->3 ; tabella 1: 0->4, 60->7
-    tables = [0x00, 1, 0, 2, 30, 3, 60, 0x01, 4, 0, 7, 60]
+    tables = [0x00, 1, 0, 2, 30, 3, 60, 0x01, 4, 0, 7, 60, 0xAD, 9, 33, 7, 54, 3, 72]   # + byte non-tabella in coda
     fmt = lambda v: ",\n".join(f"\t0x{x:02x}, // c" for x in v)  # noqa: E731
     f = tmp_path / "ppg_data.c"
     f.write_text('#include <inttypes.h>\n#include "ppg_data.h"\n\n\n'

@@ -150,7 +150,9 @@ SLOTS = 61                                 # posizioni usate di una wavetable (0
 def parse_ppg_wavetables(path: Path) -> list[list[tuple[int, int]]]:
     """`ppg_wavetable[]`: per ogni tabella un byte (ignorato), poi coppie (onda, posizione) fino
     alla posizione 60. Le posizioni fra due onde chiave si interpolano (ppg_wt_dump.c di wave-stuff).
-    Ritorna, per tabella, la lista delle chiavi [(posizione, onda), ...]."""
+    Ritorna, per tabella, la lista delle chiavi [(posizione, onda), ...].
+    Dopo l'ultima tabella il file ha altri byte (non tabelle): ci si ferma al primo record che non
+    e' una tabella valida (posizioni da 0, crescenti, fino a 60 esatto)."""
     data = _c_array(Path(path).read_text(encoding="utf-8", errors="replace"), "ppg_wavetable")
     tables, i = [], 0
     while i + 2 < len(data):
@@ -159,11 +161,12 @@ def parse_ppg_wavetables(path: Path) -> list[list[tuple[int, int]]]:
         while i + 1 < len(data):
             wave, pos = data[i], data[i + 1]
             i += 2
-            keys.append((min(pos, SLOTS - 1), wave))
+            keys.append((pos, wave))
             if pos >= SLOTS - 1:
                 break
-        else:
-            break                          # tabella troncata: fine dei dati
+        pos = [p for p, _ in keys]
+        if not pos or pos[0] != 0 or pos[-1] != SLOTS - 1 or pos != sorted(pos):
+            break
         tables.append(sorted(dict(keys).items()))
     return tables
 
