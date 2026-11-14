@@ -257,9 +257,29 @@ def test_modular_builder_accepts_local_ppg_patch(tmp_path, monkeypatch):
         modular.selected_manifest(full, local=local)
     names = [m["name"] for m in modular.selected_manifest(full - {"sy_chord"}, local=local)["mods"]]
     assert names[-1] == "ppg-chord" and "sy-chord" not in names and "deja-vu" in names
+    assert names[0] == "splash"                     # come MAX completo: ppg-chord sta per sy-chord
+    assert "splash" not in [m["name"] for m in modular.selected_manifest(frozenset({"fx3"}), local=local)["mods"]]
     assert [m["name"] for m in modular.selected_manifest(frozenset(), local=local)["mods"]] == ["ppg-chord"]
     assert modular.profile_name(full - {"sy_chord"}, local) == "CUSTOM + ppg-chord"   # nessun hash "golden"
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"name": "x", "os": "1.41", "patches": [{"section": 3, "append": True}]}))
     with pytest.raises(modular.BuildError):
         modular.load_local_mod(bad)
+
+
+@needs_stock
+def test_emulated_wave_value_reads_the_frame_we_wrote():
+    """Nel motore originale WAVE (0x40 nell'emulatore = 64) legge il frame 16: cambiarlo cambia il
+    suono, cambiare frame lontani (1, 31) no. Conferma la disposizione (al contrario) del banco."""
+    pytest.importorskip("unicorn")
+    stock = mp.read_bank(mp.stock_region(mp.load_section7(STOCK)))
+    other = waves.bank_q31(waves.bank(waves.designed_cycles()))
+    base = np.array(mp.emu_render(None, 64, 48, 0.1), dtype=float)
+
+    def diff(k):
+        q = stock.copy()
+        q[k - 1] = other[(k + 7) % 31]
+        out = np.array(mp.emu_render(mp.bank_bytes(q), 64, 48, 0.1), dtype=float)
+        return np.max(np.abs(out - base)) / np.max(np.abs(base))
+    assert diff(16) > 0.5
+    assert diff(1) == 0 and diff(31) == 0

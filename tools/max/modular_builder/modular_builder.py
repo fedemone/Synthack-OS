@@ -121,6 +121,11 @@ def selected_manifest(selection, manifest: dict | None = None, local=()) -> dict
         if clash:
             raise BuildError(f"{extra['name']} replaces " + ", ".join(labels.get(c, c) for c in clash)
                              + ": untick it to use the local patch")
+    # A local patch that replaces a feature (e.g. ppg-chord for sy-chord) counts as that feature
+    # for the full-MAX rule in resolve(): MAX keeps its splash.
+    replaced = {key for key, _, mod in FEATURES if any(mod in extra.get("conflicts", ()) for extra in local)}
+    if local and MAX_FEATURES <= frozenset(selection) | replaced and "splash" not in bundled:
+        mods = [mod for mod in manifest["mods"] if mod["name"] in bundled | {"splash"}]
     mods = [*mods, *local]
     return {
         "format": 2,
