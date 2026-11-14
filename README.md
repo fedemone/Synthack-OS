@@ -19,6 +19,7 @@ Each mod is a small patch applied to the stock OS you download from elektron.se 
 | [Readable parameter values](mods/readable-values) | ✅ v0.5.0 | Hz, dB, ms and % instead of 0–127: filters, envelopes, levels, sends, delay and reverb, on every track and the FX track. Computed from the same data the DSP uses; analog parts measured on the device. |
 | [Beat repeat](mods/beat-repeat) | ✅ v0.6.0 | Sequencer stutter on **all tracks** (analog too): hold retrig keys 13/14 on the FX track to loop the last 1/16 … 1 bar (rates RPT1/RPT2 on the TRIG page, saved with the kit) and resume in time. |
 | [Third send FX](mods/fx3) | ✅ v0.8.0 | **SND3** on every track (AMP page 1, next to DEL and REV; PAN moves to page 2) into a **chorus, flanger, phaser or crusher**, with its own page (REVERB tab, page 2) saved with the kit, independent return level and a send into the delay. |
+| [PPG-style chord wave](mods/ppg-chord) | 🧪 new | **SY CHORD** plays a PPG-format digital wave (hollow, brass, vox, glass, reso, sync, organ) instead of the stock one. Data only, no CPU cost. Pick the wave at build time; preview the chords as WAVs first. |
 | PIN lock | ⬜ planned | Optional PIN at power-on, as a theft deterrent. Recovery via OS reflash stays possible. |
 | Dual mono v2 | ⬜ planned | Separate IN L / IN R pages with their own FX sends. |
 | New LFO shapes · 3rd LFO / mod matrix | ⬜ planned | |
@@ -58,6 +59,8 @@ python tools/build/build.py --stock firmware/Syntakt_OS1.41.syx \
     mods/splash mods/dual-mono mods/modarea mods/vparams mods/master-comp mods/readable-values mods/beat-repeat \
     mods/fx3 -o out/synthack.syx
 ```
+
+Optional: `python mods/ppg-chord/make_patch.py build --wave hollow` once, then add `mods/ppg-chord` to the list.
 
 Flash `out/synthack.syx` with Elektron Transfer (USB, *Drop* page). To go back, flash the stock OS the same way.
 
