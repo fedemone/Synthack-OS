@@ -19,6 +19,10 @@ RC2 restores native MIDI parameter ownership when optional MAX effects are activ
 
 The GUI offers **MAX FULL + FM4**, **Original MAX 1.0**, **FM4 ONLY**, and **CUSTOM**. All 255 nonempty selections are build-validated for patch compatibility and placement, but not individually hardware-tested.
 
+## Local patch (this fork)
+
+The *Local patch* field takes a stock-guarded `patch.json` built on your machine, such as [mods/ppg-chord](../../../mods/ppg-chord) (a PPG wavetable for SY CHORD). Untick *SY CHORD Wave Bank* first: the two write the same region, and the builder refuses the combination. Builds with a local patch are reported as `CUSTOM + <name>` and have no pinned golden hash. The packaged EXE must be rebuilt from this source to show the field.
+
 ## Build
 
 1. Back up projects and sounds. Keep the official OS 1.41 file available for recovery. The required input SHA-256 is `8e2488f462c4a5656396a895f113bcd415e9900fa8709340dccf45d4cb9ed19e`.

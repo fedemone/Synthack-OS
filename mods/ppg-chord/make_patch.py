@@ -1,18 +1,20 @@
-"""ppg-chord: sostituisce l'onda a ciclo singolo di SY CHORD con un'onda "stile PPG".
+"""ppg-chord: una wavetable PPG nel banco di SY CHORD. Girare WAVE la scorre come sul PPG.
 
-SY CHORD legge 512 x int32 (Q31) a 0x4001A300, sezione 7 (motore audio, CPU #2; docs/audio-path.md).
-La patch riscrive solo quei 2048 byte: nessun codice cambia.
+SY CHORD ha un banco di 32 frame: WAVE 0 = seno condiviso (non lo tocchiamo), WAVE 4, 8 ... 124 =
+frame 1..31, e i valori in mezzo sono interpolati dalla machine (docs/audio-path.md). Una wavetable
+PPG ha 61 posizioni: le 31 pari (0, 2 ... 60) riempiono esattamente i 31 frame.
 
-    python mods/ppg-chord/make_patch.py list                       # le onde disponibili
-    python mods/ppg-chord/make_patch.py preview                    # WAV di accordi, senza firmware
-    python mods/ppg-chord/make_patch.py build --wave hollow        # patch.json (serve l'OS stock)
-    python mods/ppg-chord/make_patch.py build --wave vox --emu     # + SY CHORD nell'emulatore, prima/dopo
-    python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c   # TUTTE le onde, pagina HTML locale
-    python mods/ppg-chord/make_patch.py build --ppg-rom local/ppg_data.c --ppg-index 23
-    python mods/ppg-chord/make_patch.py build --ppg-rom local/ppg_data.c --ppg-table 5 --ppg-slot 30
+    python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c   # tutte le onde e tabelle
+    python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --ppg-table 5
+    python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-table 5
+    python mods/ppg-chord/make_patch.py build   --designed                 # senza ROM: le 7 onde nostre
 
-Le onde sono descritte in waves.py. --ppg-rom legge una copia LOCALE dei dati di wave-stuff
-(data/ppg_data.c): mettila in local/ (git-ignored), non nel repo.
+La patch scrive la stessa regione del banco "sy-chord" di MAX (0x40016B80, 31868 B): le due mod
+si escludono (il build rifiuta le sovrapposizioni). Le immagini delle onde sullo schermo NON
+vengono ridisegnate: mostrano ancora le forme stock.
+
+--ppg-rom legge una copia LOCALE dei dati di wave-stuff (data/ppg_data.c): tienila in local/
+(git-ignored). Una patch.json fatta cosi' contiene dati derivati da quella ROM.
 """
 
 from __future__ import annotations
@@ -32,22 +34,50 @@ sys.path[:0] = [str(HERE), str(REPO / "tools" / "unpack"), str(REPO / "tools" / 
 import waves  # noqa: E402
 from wav import SAMPLE_RATE, write_q31  # noqa: E402
 
-LOAD = 0x4000_0400                 # la sezione 7 si carica qui
-TABLE_ADDR = 0x4001_A300           # onda di SY CHORD (docs/audio-path.md)
-TABLE_LEN = waves.TABLE * 4        # 2048 B
+LOAD = 0x4000_0400                     # la sezione 7 si carica qui
+BANK_END = 0x1E3FC                     # offset nella sezione 7: frame k a BANK_END - k * STEP
+STEP = 0x404                           # 257 x int32
+BANK_ADDR = LOAD + BANK_END - waves.FRAMES * STEP      # 0x40016B80, frame 31 ... frame 1
+BANK_LEN = waves.FRAMES * STEP                          # 31868 B
+SINE_ADDR = LOAD + 0x53E50             # WAVE 0, seno condiviso con altre machine: mai toccato
+# Impronta dei byte stock della regione: la stessa che dichiara il banco "sy-chord" di MAX
+# (tools/max/modular_builder/resources/modular-manifest.json), verificata contro l'OS 1.41.
+BANK_STOCK_SHA256 = "c3ddef55f4b413a40067432f741f832a5c082bbe3afb66fe5044ec540be3bf1e"
 SECTION7_SHA256 = "daf6451cf9587c0b628e901b7bb6b25f4e2633d448c534c0c181dd35ec783bc2"   # OS 1.41
-SY_CHORD_MACHINE = 5               # ID machine per tools/emu (engine 5 = SY CHORD)
+SY_CHORD_MACHINE = 5                   # ID machine per tools/emu
 OUT = REPO / "out" / "ppg-chord"
+STOCK = REPO / "firmware" / "Syntakt_OS1.41.syx"
 
 CHORDS = {"min": (0, 3, 7, 12), "maj": (0, 4, 7, 12), "sus4": (0, 5, 7, 12), "min7": (0, 3, 7, 10),
-          "fifth": (0, 7, 12)}
+          "fifth": (0, 7, 12), "note": (0,)}
 
 
 def sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-# ------------------------------------------------------------------ tabella stock
+# ------------------------------------------------------------------ banco
+
+def frame_offset(k: int) -> int:
+    """Offset del frame k (1..31) DENTRO la regione della patch (il banco e' al contrario)."""
+    if not 1 <= k <= waves.FRAMES:
+        raise ValueError("frame 1..31")
+    return (waves.FRAMES - k) * STEP
+
+
+def bank_bytes(q31: np.ndarray) -> bytes:
+    """(31, 257) int32, frame 1..31 -> i 31868 byte della regione (frame 31 per primo)."""
+    out = bytearray(BANK_LEN)
+    for k in range(1, waves.FRAMES + 1):
+        struct.pack_into(f">{waves.FRAME_SAMPLES + 1}i", out, frame_offset(k), *(int(v) for v in q31[k - 1]))
+    return bytes(out)
+
+
+def read_bank(region: bytes) -> np.ndarray:
+    """I 31868 byte della regione -> (31, 257) int32, frame 1..31."""
+    return np.array([struct.unpack_from(f">{waves.FRAME_SAMPLES + 1}i", region, frame_offset(k))
+                     for k in range(1, waves.FRAMES + 1)], dtype=np.int64)
+
 
 def load_section7(stock: Path) -> bytes:
     import eft
@@ -59,113 +89,72 @@ def load_section7(stock: Path) -> bytes:
     return data
 
 
-def read_table(sec7: bytes, addr: int = TABLE_ADDR) -> np.ndarray:
-    o = addr - LOAD
-    return np.array(struct.unpack_from(f">{waves.TABLE}i", sec7, o), dtype=np.int64)
+def stock_region(sec7: bytes) -> bytes:
+    o = BANK_ADDR - LOAD
+    region = sec7[o:o + BANK_LEN]
+    if sha(region) != BANK_STOCK_SHA256:
+        raise SystemExit("il banco di SY CHORD non e' quello stock di OS 1.41")
+    return region
 
 
-def looks_like_wave(t: np.ndarray) -> tuple[bool, str]:
-    """Una tabella di 512 int32 sembra un ciclo d'onda? (ampia, centrata, pochi salti)"""
-    t = t.astype(np.float64)
-    peak = np.max(np.abs(t))
-    if peak < 2 ** 24:
-        return False, f"picco troppo basso ({peak:.3g})"
-    if abs(np.mean(t)) > 0.05 * peak:
-        return False, f"componente continua {np.mean(t) / peak:+.1%} del picco"
-    jumps = int(np.sum(np.abs(np.diff(np.append(t, t[0]))) > 0.25 * peak))
-    if jumps > 2:
-        return False, f"{jumps} salti: non e' un ciclo liscio"
-    return True, f"picco {20 * np.log10(peak / 2 ** 31):.1f} dBFS, RMS/picco {np.sqrt(np.mean(t ** 2)) / peak:.2f}"
+def make_bank(cycles: list[np.ndarray], harmonics: int) -> np.ndarray:
+    return waves.bank_q31(waves.bank(cycles, harmonics))
 
 
-def survey(sec7: bytes) -> list[str]:
-    """Blocchi da 2 KB vicini all'onda nota: se anche loro sembrano onde, il parametro WAV
-    potrebbe scegliere fra piu' tabelle (da verificare nel disassemblato prima di toccarle)."""
-    lines = []
-    for k in range(-8, 9):
-        addr = TABLE_ADDR + k * TABLE_LEN
-        if addr < LOAD or addr + TABLE_LEN - LOAD > len(sec7):
-            continue
-        ok, why = looks_like_wave(read_table(sec7, addr))
-        if ok or k == 0:
-            lines.append(f"  {addr:#010x}{'  <- SY CHORD (patch)' if k == 0 else ''}: {why}")
-    return lines
-
-
-# ------------------------------------------------------------------ patch
-
-def make_table(wave: waves.Wave, stock: np.ndarray | None, interp: str, gain_db: float) -> np.ndarray:
-    return waves.fit_level(waves.to_table(wave.cycle, interp), stock, gain_db)
-
-
-def table_bytes(table: np.ndarray) -> bytes:
-    return struct.pack(f">{waves.TABLE}i", *(int(v) for v in table))
-
-
-def build_spec(sec7: bytes, wave: waves.Wave, interp: str = "fft", gain_db: float = 0.0,
-               bits: int | None = None, source: str = "") -> tuple[dict, np.ndarray]:
-    stock = read_table(sec7)
-    ok, why = looks_like_wave(stock)
-    if not ok:
-        raise SystemExit(f"a {TABLE_ADDR:#x} non c'e' l'onda attesa ({why}): OS diverso?")
-    table = make_table(wave, stock, interp, gain_db)
-    original = sec7[TABLE_ADDR - LOAD:TABLE_ADDR - LOAD + TABLE_LEN]
-    desc = (f"SY CHORD: onda '{wave.name}' ({source or 'progettata in waves.py'}"
-            f"{f', {bits} bit' if bits else ''}, interp {interp}, {gain_db:+.1f} dB) al posto di quella stock.")
-    spec = {"name": "ppg-chord", "os": "1.41", "description": desc,
+def build_spec(q31: np.ndarray, source: str, harmonics: int) -> dict:
+    return {"name": "ppg-chord", "os": "1.41",
+            "description": f"SY CHORD: wavetable {source} nei frame WAVE 4..124 ({harmonics} armoniche); "
+                           "WAVE 0 e immagini dello schermo invariati.",
             "generated_by": "mods/ppg-chord/make_patch.py",
-            "wave": {"name": wave.name, "interp": interp, "gain_db": gain_db, "bits": bits, "source": source},
-            "patches": [{"section": 7, "addr": f"{TABLE_ADDR:#010X}", "len": TABLE_LEN,
-                         "expect_sha256": sha(original), "hex": table_bytes(table).hex(),
-                         "what": f"onda di SY CHORD: 512 x int32 Q31, '{wave.name}'"}]}
-    return spec, table
+            "conflicts": ["sy-chord"],
+            "wave": {"source": source, "harmonics": harmonics,
+                     "frames": {str(4 * k): f"posizione {waves.TABLE_POSITIONS[k - 1]}" for k in range(1, 32)}},
+            "patches": [{"section": 7, "addr": f"{BANK_ADDR:#010X}", "len": BANK_LEN,
+                         "expect_sha256": BANK_STOCK_SHA256, "hex": bank_bytes(q31).hex(),
+                         "what": "banco SY CHORD, frame 31..1 (WAVE 124..4), 257 x int32 ciascuno"}]}
 
 
 # ------------------------------------------------------------------ ascolto
 
-def render_chord(table: np.ndarray, root: int = 48, chord: str = "min", seconds: float = 2.0,
-                 detune_cents: float = 4.0) -> np.ndarray:
-    """Accordo sostenuto letto dalla tabella con interpolazione lineare (come un oscillatore a
-    tabella). Solo per l'ascolto: il motore vero aggiunge filtro, inviluppo, ecc."""
-    t = np.asarray(table, dtype=np.float64) / 2 ** 31
+def render(q31: np.ndarray, wave_from: float = 4, wave_to: float = 124, seconds: float = 6.0,
+           root: int = 48, chord: str = "min", detune_cents: float = 4.0) -> np.ndarray:
+    """Accordo che scorre il banco da WAVE wave_from a wave_to, interpolando fra frame vicini come
+    SY CHORD (WAVE/4 = frame; in mezzo, miscela lineare). Solo ascolto: niente filtro o inviluppo."""
+    fr = np.asarray(q31, dtype=np.float64)[:, :waves.FRAME_SAMPLES] / 2 ** 31
     n = int(seconds * SAMPLE_RATE)
+    pos = np.clip(np.linspace(wave_from, wave_to, n) / 4 - 1, 0, waves.FRAMES - 1)   # 0 = frame 1
+    lo = np.minimum(pos.astype(np.int64), waves.FRAMES - 2)
+    mix = pos - lo
     out = np.zeros(n)
-    for i, semi in enumerate(CHORDS[chord]):
-        cents = detune_cents * (i - (len(CHORDS[chord]) - 1) / 2)
+    notes = CHORDS[chord]
+    for i, semi in enumerate(notes):
+        cents = detune_cents * (i - (len(notes) - 1) / 2)
         f = 440.0 * 2 ** ((root + semi - 69) / 12 + cents / 1200)
-        ph = (np.arange(n) * f / SAMPLE_RATE + 0.13 * i) % 1.0 * waves.TABLE
+        ph = (np.arange(n) * f / SAMPLE_RATE + 0.13 * i) % 1.0 * waves.FRAME_SAMPLES
         k = ph.astype(np.int64)
-        fr = ph - k
-        out += t[k] * (1 - fr) + t[(k + 1) % waves.TABLE] * fr
+        fr_ = ph - k
+        k2 = (k + 1) % waves.FRAME_SAMPLES
+        a = fr[lo, k] * (1 - fr_) + fr[lo, k2] * fr_
+        b = fr[lo + 1, k] * (1 - fr_) + fr[lo + 1, k2] * fr_
+        out += a * (1 - mix) + b * mix
     env = np.minimum(1.0, np.arange(n) / (0.005 * SAMPLE_RATE))
     rel = min(int(0.3 * SAMPLE_RATE), n // 2)
     env[-rel:] *= np.linspace(1, 0, rel)
-    return out * env / len(CHORDS[chord])
+    return out * env / len(notes)
 
 
 def write_wav(path: Path, x: np.ndarray) -> None:
     write_q31(path, [int(v) for v in np.clip(x, -1, 1) * (2 ** 31 - 1)], normalize=True)
 
 
-def preview(names: list[str], tables: dict[str, np.ndarray], outdir: Path, chord: str, root: int) -> None:
-    gap = np.zeros(int(0.25 * SAMPLE_RATE))
-    reel = []
-    for name in names:
-        x = render_chord(tables[name], root, chord)
-        write_wav(outdir / f"{name}_{chord}.wav", x)
-        reel += [x, gap]
-        print(f"  {name:8s} -> {outdir / f'{name}_{chord}.wav'}")
-    write_wav(outdir / f"all_{chord}.wav", np.concatenate(reel))
-    print(f"  tutte in fila ({', '.join(names)}) -> {outdir / f'all_{chord}.wav'}")
-
-
-def emu_render(table: bytes | None, note: int, seconds: float) -> list[int]:
-    """SY CHORD nel motore ORIGINALE (tools/emu), con la tabella sostituita in memoria prima dell'avvio."""
+def emu_render(region: bytes | None, wave: int, note: int, seconds: float) -> list[int]:
+    """SY CHORD nel motore ORIGINALE (tools/emu), col banco sostituito in memoria prima dell'avvio.
+    Nota: i parametri machine di tools/emu sono tutti a 0x40, quindi WAVE e' quello che e'."""
     import cli
     import engine as eng
     e = eng.Engine()
-    if table is not None:
-        e.uc.mem_write(TABLE_ADDR, table)
+    if region is not None:
+        e.uc.mem_write(BANK_ADDR, region)
     e.boot()
     params = cli.make_params(SY_CHORD_MACHINE, note)
     out: list[int] = []
@@ -179,57 +168,58 @@ def emu_render(table: bytes | None, note: int, seconds: float) -> list[int]:
 
 # ------------------------------------------------------------------ riga di comando
 
-def pick_wave(a: argparse.Namespace) -> tuple[waves.Wave, str]:
-    if a.ppg_rom:
-        if a.ppg_table is not None:
-            if a.ppg_slot is None:
-                raise SystemExit("--ppg-table richiede --ppg-slot 0..60")
-            w, how = waves.from_ppg_table(a.ppg_rom, a.ppg_table, a.ppg_slot)
-            return w, f"ROM PPG locale, wavetable {a.ppg_table} posizione {a.ppg_slot} = {how}"
-        if a.ppg_index is None:
-            raise SystemExit("--ppg-rom richiede --ppg-index N oppure --ppg-table T --ppg-slot S")
-        return waves.from_ppg_rom(a.ppg_rom, a.ppg_index), f"ROM PPG locale, onda {a.ppg_index}"
-    return waves.design(a.wave, a.bits), ""
+def pick_source(a: argparse.Namespace) -> list[tuple[str, list[np.ndarray]]]:
+    """[(nome, 31 cicli)] secondo le opzioni."""
+    if a.designed is not None:
+        return [("designed", waves.designed_cycles(a.designed or None))]
+    if not a.ppg_rom:
+        raise SystemExit("serve --ppg-rom local/ppg_data.c con --ppg-table T (o --designed)")
+    rom, tables = waves.parse_ppg_rom(a.ppg_rom), waves.parse_ppg_wavetables(a.ppg_rom)
+    ids = range(len(tables)) if getattr(a, "all", False) else [a.ppg_table]
+    out = []
+    for t in ids:
+        if t is None or not 0 <= t < len(tables):
+            raise SystemExit(f"--ppg-table: 0..{len(tables) - 1}")
+        out.append((f"ppg-wt{t:02d}", waves.table_cycles(rom, tables[t])))
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="onde progettate (per la ROM PPG: catalog)")
-    c = sub.add_parser("catalog", help="pagina HTML locale con TUTTE le onde, da ascoltare e scegliere")
+    c = sub.add_parser("catalog", help="pagina HTML locale con tutte le onde e le wavetable")
     c.add_argument("--ppg-rom", type=Path, help="copia locale di wave-stuff/data/ppg_data.c")
     c.add_argument("-o", "--out", type=Path, default=OUT / "catalog.html")
 
-    def wave_args(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--interp", choices=("fft", "step"), default="fft",
-                       help="fft = pulito (default), step = 8 bit senza interpolazione, piu' sporco")
-        p.add_argument("--bits", type=int, choices=(8, 16), default=8, help="quantizzazione dell'onda (8 = PPG)")
-        p.add_argument("--gain-db", type=float, default=0.0, help="correzione di livello (mai oltre il picco stock)")
+    def src_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("--ppg-rom", type=Path, help="copia locale di wave-stuff/data/ppg_data.c")
-        p.add_argument("--ppg-index", type=int, help="onda della ROM PPG, 0..255")
-        p.add_argument("--ppg-table", type=int, help="wavetable della ROM PPG (con --ppg-slot)")
-        p.add_argument("--ppg-slot", type=int, help="posizione nella wavetable, 0..60 (interpolata fra le chiavi)")
-        p.add_argument("--stock", type=Path, default=REPO / "firmware" / "Syntakt_OS1.41.syx")
+        p.add_argument("--ppg-table", type=int, help="wavetable PPG 0..28")
+        p.add_argument("--designed", nargs="*", metavar="ONDA",
+                       help="wavetable con le onde progettate (default: tutte e 7, in ordine)")
+        p.add_argument("--harmonics", type=int, default=40,
+                       help="limite di banda (1..63, default 40 come Workbench): piu' alto = piu' brillante, "
+                            "ma SY CHORD usa un solo frame per tutte le note, quindi aliasing in alto")
 
-    p = sub.add_parser("preview", help="accordi in WAV per ogni onda (non serve il firmware)")
-    p.add_argument("--wave", nargs="+", default=list(waves.SPECTRA))
+    p = sub.add_parser("preview", help="WAV: un accordo che scorre WAVE 4 -> 124 (non serve il firmware)")
+    src_args(p)
+    p.add_argument("--all", action="store_true", help="tutte le wavetable della ROM, un file ciascuna")
     p.add_argument("--chord", choices=CHORDS, default="min")
-    p.add_argument("--root", type=int, default=48, help="nota MIDI della fondamentale (48 = C3)")
+    p.add_argument("--root", type=int, default=48, help="nota MIDI (48 = C3)")
+    p.add_argument("--seconds", type=float, default=6.0)
+    p.add_argument("--hold", type=float, help="WAVE fisso invece dello scorrimento (4..124)")
     p.add_argument("-o", "--out", type=Path, default=OUT / "preview")
-    wave_args(p)
 
-    b = sub.add_parser("build", help="scrive mods/ppg-chord/patch.json (serve l'OS stock)")
-    b.add_argument("--wave", choices=waves.SPECTRA, default="hollow")
-    b.add_argument("--emu", action="store_true", help="anche SY CHORD nell'emulatore, stock e patch (lento)")
-    b.add_argument("--note", type=int, default=48)
-    wave_args(b)
+    b = sub.add_parser("build", help="scrive mods/ppg-chord/patch.json")
+    src_args(b)
+    b.add_argument("--stock", type=Path, default=STOCK, help="se presente, verifica il banco stock")
+    b.add_argument("--emu", action="store_true", help="anche SY CHORD nell'emulatore, stock e banco nuovo")
     a = ap.parse_args(argv)
 
     if a.cmd == "list":
         for name, (desc, _) in waves.SPECTRA.items():
             print(f"  {name:8s} {desc}")
         return 0
-
     if a.cmd == "catalog":
         import catalog
         n = catalog.build(a.ppg_rom, a.out)
@@ -237,47 +227,38 @@ def main(argv: list[str] | None = None) -> int:
               f"{'' if a.ppg_rom else ' (senza --ppg-rom: solo le progettate)'}")
         return 0
 
-    stock_table = None
-    if a.stock.exists():
-        sec7 = load_section7(a.stock)
-        stock_table = read_table(sec7)
+    sources = pick_source(a)
     if a.cmd == "preview":
-        tables = {}
-        if stock_table is not None:
-            tables["stock"] = stock_table
-        if a.ppg_rom:
-            w, _ = pick_wave(a)
-            tables[w.name] = make_table(w, stock_table, a.interp, a.gain_db)
-        else:
-            for name in a.wave:
-                tables[name] = make_table(waves.design(name, a.bits), stock_table, a.interp, a.gain_db)
-        print(f"accordo {a.chord} su {a.root}" + ("" if stock_table is not None
-                                                 else " (OS stock assente: niente confronto con l'onda originale)"))
-        preview(list(tables), tables, a.out, a.chord, a.root)
+        for name, cycles in sources:
+            q = make_bank(cycles, a.harmonics)
+            lo, hi = (a.hold, a.hold) if a.hold is not None else (4, 124)
+            path = a.out / f"{name}_{a.chord}{'' if a.hold is None else f'_w{a.hold:g}'}.wav"
+            write_wav(path, render(q, lo, hi, a.seconds, a.root, a.chord))
+            print(f"  {name}: WAVE {lo:g}->{hi:g} -> {path}")
         return 0
 
-    raise SystemExit(
-        "build disattivato: SY CHORD non ha UNA tabella da 512 a 0x4001A300 ma un banco di 32 frame\n"
-        "(frame 0 = seno condiviso a 0x40054250; frame 1..31 = 257 x int32, 0x404 B ciascuno, al contrario,\n"
-        "fino a 0x4001E7FC; WAVE = 4 x frame, interpolato). 0x4001A300 cade dentro i frame 16-18 (WAVE 64-72).\n"
-        "Fonte: syntakt-firmware-workbench (Bezronczek, MIT), misurato su hardware. La patch va rifatta.")
-    if stock_table is None:
-        raise SystemExit(f"{a.stock}: serve l'OS stock 1.41 (vedi firmware/README.md)")
-    print("tabelle a 512 x int32 vicino all'onda di SY CHORD:")
-    print("\n".join(survey(sec7)))
-    wave, source = pick_wave(a)
-    spec, table = build_spec(sec7, wave, a.interp, a.gain_db, None if a.ppg_rom else a.bits, source)
+    if len(sources) != 1:
+        raise SystemExit("build: una sola sorgente")
+    name, cycles = sources[0]
+    q = make_bank(cycles, a.harmonics)
+    sec7 = None
+    if a.stock.exists():
+        sec7 = load_section7(a.stock)
+        stock_region(sec7)
+        print("banco stock verificato (OS 1.41)")
+    else:
+        print(f"{a.stock} assente: impronta del banco stock presa dal manifest di MAX (il build la riverifica)")
+    spec = build_spec(q, name, a.harmonics)
     (HERE / "patch.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
-    print(f"patch.json: '{wave.name}' a {TABLE_ADDR:#x} ({TABLE_LEN} B)")
-    for label, t in (("stock", stock_table), (wave.name, table)):
-        hs = ", ".join(f"{k}:{db:.0f}" for k, db in waves.harmonics(t, 10))
-        print(f"  {label:8s} armoniche (n:dB) {hs}")
+    print(f"patch.json: {name} -> WAVE 4..124 ({BANK_LEN} B a {BANK_ADDR:#x}); WAVE 0 e schermo invariati")
     if a.emu:
+        if sec7 is None:
+            raise SystemExit("--emu richiede l'OS stock")
         OUT.mkdir(parents=True, exist_ok=True)
-        for label, data in (("stock", None), (wave.name, table_bytes(table))):
-            path = OUT / f"emu_{label}_n{a.note}.wav"
-            peak = write_q31(path, emu_render(data, a.note, 0.5), normalize=True)
-            print(f"  emulatore {label:8s}: picco {peak:.1f} dBFS -> {path}")
+        for label, region in (("stock", None), (name, bank_bytes(q))):
+            path = OUT / f"emu_{label}.wav"
+            peak = write_q31(path, emu_render(region, 64, 48, 0.5), normalize=True)
+            print(f"  emulatore {label}: picco {peak:.1f} dBFS -> {path}")
     return 0
 
 

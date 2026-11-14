@@ -3,8 +3,9 @@
     python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c
 
 Contiene le onde progettate (waves.SPECTRA), le onde della ROM PPG e le wavetable con tutte le
-posizioni interpolate. Clic su un'onda: la suona come accordo (Web Audio, a banda limitata come
---interp fft) e mostra il comando `build` esatto. Le stelle restano nel browser.
+posizioni interpolate. La mod mette UNA wavetable nel banco di SY CHORD: le posizioni pari
+(0, 2 ... 60) diventano WAVE 4, 8 ... 124. Clic su un'onda: la suona come accordo (Web Audio);
+"sweep" scorre i 31 frame come girare WAVE; il piede della pagina mostra il comando `build`.
 
 La pagina contiene i dati della ROM letti dalla TUA copia locale: generala in out/ (git-ignored)
 e non pubblicarla.
@@ -75,7 +76,7 @@ button.on{border-color:var(--acc);color:var(--acc)}main{padding:12px 16px 120px}
 .meta b{color:var(--ink)}.star{position:absolute;top:4px;right:6px;color:var(--mute);font-size:15px}.star.on{color:var(--acc)}
 .tbl{margin:0 0 18px}.tbl h3{font-size:14px;margin:0 0 4px}.tbl .keys{color:var(--mute);font-size:12px;margin-bottom:6px}
 .strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:4px}.strip .card{padding:3px}.strip canvas{height:34px}
-.strip .card.key{border-color:var(--wave)}footer{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);padding:10px 16px}
+.strip .card.key{border-color:var(--wave)}.strip .card.off{opacity:.45}.tbl h3 button{margin-left:8px;font-size:12px;padding:2px 8px}footer{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);padding:10px 16px}
 code{font:12px ui-monospace,monospace;word-break:break-all}.desc{font-size:12px;color:var(--mute)}.note{color:var(--mute);font-size:12px}
 </style></head><body>
 <header><h1>PPG Chord Waves</h1>
@@ -88,7 +89,7 @@ code{font:12px ui-monospace,monospace;word-break:break-all}.desc{font-size:12px;
  <select id="root"><option value="36">C2</option><option value="48" selected>C3</option><option value="60">C4</option></select>
 </div></header>
 <main id="main"></main>
-<footer><div id="sel" class="note">Click a wave to hear it as a chord. ★ to shortlist.</div><code id="cmd"></code></footer>
+<footer><div id="sel" class="note">Click a wave to hear it as a chord, or ▶ sweep to hear a whole table as WAVE 4→124. ★ to shortlist.</div><code id="cmd"></code></footer>
 <script>
 const D=/*DATA*/null;
 const dec=s=>{const b=atob(s),a=new Int8Array(b.length);for(let i=0;i<b.length;i++)a[i]=(b.charCodeAt(i)<<24)>>24;return a};
@@ -102,15 +103,20 @@ function draw(cv,c){const r=devicePixelRatio||1,w=cv.clientWidth*r,h=cv.clientHe
  g.strokeStyle=css("--wave");g.lineWidth=1.3*r;g.beginPath();c.forEach((v,i)=>{const x=i/127*w,y=h/2-v/128*h*.45;i?g.lineTo(x,y):g.moveTo(x,y)});g.stroke()}
 function slotCycle(keys,s){let L=keys[0],R=keys[keys.length-1];for(const k of keys){if(k[0]<=s)L=k;}for(const k of [...keys].reverse()){if(k[0]>=s)R=k;}
  const a=cyc(RC,L[1]);if(R[0]===L[0])return a;const t=(s-L[0])/(R[0]-L[0]),b=cyc(RC,R[1]);return a.map((v,i)=>(1-t)*v+t*b[i])}
-let ac,voices=[];
-function play(c){ac=ac||new AudioContext();voices.forEach(v=>{try{v.stop()}catch(e){}});voices=[];
- const N=128,H=63,re=new Float32Array(H+1),im=new Float32Array(H+1),m=c.reduce((a,b)=>a+b,0)/N;
+let ac,voices=[],timers=[];
+const H=40;  // same band limit as the build default
+function pwave(c){const N=128,re=new Float32Array(H+1),im=new Float32Array(H+1),m=c.reduce((a,b)=>a+b,0)/N;
  for(let k=1;k<=H;k++){let sr=0,si=0;for(let n=0;n<N;n++){const p=2*Math.PI*k*n/N;sr+=(c[n]-m)*Math.cos(p);si-=(c[n]-m)*Math.sin(p)}re[k]=2*sr/N;im[k]=-2*si/N}
- const pw=ac.createPeriodicWave(re,im),notes=document.getElementById("chord").value.split(",").map(Number),root=+document.getElementById("root").value;
- const g=ac.createGain(),t=ac.currentTime;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.5/notes.length,t+.01);g.gain.setValueAtTime(.5/notes.length,t+1.1);g.gain.linearRampToValueAtTime(0,t+1.5);g.connect(ac.destination);
- notes.forEach((n,i)=>{const o=ac.createOscillator();o.setPeriodicWave(pw);o.frequency.value=440*Math.pow(2,(root+n-69)/12)*Math.pow(2,(i-(notes.length-1)/2)*4/1200);o.connect(g);o.start(t);o.stop(t+1.6);voices.push(o)})}
+ return ac.createPeriodicWave(re,im)}
+function stop(){voices.forEach(v=>{try{v.stop()}catch(e){}});voices=[];timers.forEach(clearTimeout);timers=[]}
+function play(c,dur=1.5){ac=ac||new AudioContext();stop();
+ const pw=pwave(c),notes=document.getElementById("chord").value.split(",").map(Number),root=+document.getElementById("root").value;
+ const g=ac.createGain(),t=ac.currentTime,lv=.5/notes.length;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(lv,t+.01);g.gain.setValueAtTime(lv,t+dur-.4);g.gain.linearRampToValueAtTime(0,t+dur);g.connect(ac.destination);
+ notes.forEach((n,i)=>{const o=ac.createOscillator();o.setPeriodicWave(pw);o.frequency.value=440*Math.pow(2,(root+n-69)/12)*Math.pow(2,(i-(notes.length-1)/2)*4/1200);o.connect(g);o.start(t);o.stop(t+dur+.1);voices.push(o)});return voices}
+function sweep(keys){const cs=[];for(let s=0;s<61;s+=2)cs.push(slotCycle(keys,s));const os=play(cs[0],6.2),pws=cs.map(pwave);
+ pws.forEach((pw,i)=>timers.push(setTimeout(()=>os.forEach(o=>{try{o.setPeriodicWave(pw)}catch(e){}}),i*6000/31)))}
 function select(card,label,args,c){document.querySelectorAll(".card.sel").forEach(e=>e.classList.remove("sel"));card.classList.add("sel");
- document.getElementById("sel").textContent=label;document.getElementById("cmd").textContent=D.cmd+" build "+args;play(c)}
+ document.getElementById("sel").textContent=label;document.getElementById("cmd").textContent=args?D.cmd+" build "+args:"";play(c)}
 function card(id,label,sub,c,args,extra=""){const d=document.createElement("div");d.className="card "+extra;
  d.innerHTML=`<span class="star ${stars.has(id)?"on":""}">★</span><canvas></canvas><div class="meta"><b>${label}</b><span>${sub}</span></div>`;
  d.onclick=e=>{if(e.target.classList.contains("star")){stars.has(id)?stars.delete(id):stars.add(id);e.target.classList.toggle("on");saveStars();return}select(d,label+" "+sub,args,c)};
@@ -120,13 +126,18 @@ function render(){document.querySelectorAll("[data-tab]").forEach(b=>b.classList
  const M=document.getElementById("main"),srt=document.getElementById("sort").value,hide=document.getElementById("hide").checked,only=document.getElementById("stars").checked;M.innerHTML="";
  if(tab!=="designed"&&!D.rom.length){M.innerHTML='<p class="note">No ROM loaded. Run <code>make_patch.py catalog --ppg-rom local/ppg_data.c</code> with your local copy of wave-stuff\'s data/ppg_data.c.</p>';return}
  if(tab==="designed"){const G=document.createElement("div");G.className="grid";let L=D.designed.map((w,i)=>({...w,i}));if(srt==="b")L.sort((a,b)=>a.b-b.b);
-  L.filter(w=>!only||stars.has("d:"+w.name)).forEach(w=>{const c=card("d:"+w.name,w.name,"bright "+w.b,cyc(DC,w.i),"--wave "+w.name);c.title=w.desc;G.append(c)});M.append(G);return}
+  M.insertAdjacentHTML("beforeend",'<p class="note">Our 7 waves. As a wavetable they are spread over WAVE 4…124 in this order (or the order you give to <code>--designed</code>).</p>');
+  L.filter(w=>!only||stars.has("d:"+w.name)).forEach(w=>{const c=card("d:"+w.name,w.name,"bright "+w.b,cyc(DC,w.i),"--designed");c.title=w.desc;G.append(c)});M.append(G);return}
  if(tab==="rom"){const G=document.createElement("div");G.className="grid";let L=D.rom.map((w,i)=>({...w,i}));if(hide)L=L.filter(w=>!w.empty&&w.dup<0);if(srt==="b")L.sort((a,b)=>a.b-b.b);
-  L.filter(w=>!only||stars.has("w:"+w.i)).forEach(w=>G.append(card("w:"+w.i,"#"+w.i,w.empty?"empty":w.dup>=0?"= #"+w.dup:"bright "+w.b,cyc(RC,w.i),rom+"--ppg-index "+w.i)));
-  M.insertAdjacentHTML("beforeend",`<p class="note">${L.length} of ${D.rom.length} waves shown.</p>`);M.append(G);return}
+  L.filter(w=>!only||stars.has("w:"+w.i)).forEach(w=>G.append(card("w:"+w.i,"#"+w.i,w.empty?"empty":w.dup>=0?"= #"+w.dup:"bright "+w.b,cyc(RC,w.i),"")));
+  M.insertAdjacentHTML("beforeend",`<p class="note">${L.length} of ${D.rom.length} waves shown. Browse only: the build takes a whole wavetable (Wavetables tab).</p>`);M.append(G);return}
  D.tables.forEach((keys,t)=>{const S=document.createElement("div");S.className="tbl";
-  S.innerHTML=`<h3>Wavetable ${t}</h3><div class="keys">key waves (slot→wave): ${keys.map(k=>k[0]+"→#"+k[1]).join("  ")}</div>`;const G=document.createElement("div");G.className="strip";
-  for(let s=0;s<61;s++){const id="t:"+t+":"+s;if(only&&!stars.has(id))continue;const isKey=keys.some(k=>k[0]===s);G.append(card(id,t+"/"+s,isKey?"key":"",slotCycle(keys,s),rom+`--ppg-table ${t} --ppg-slot ${s}`,isKey?"key":""))}
+  const args=rom+`--ppg-table ${t}`;
+  S.innerHTML=`<h3>Wavetable ${t}<button>▶ sweep</button></h3><div class="keys">key waves (slot→wave): ${keys.map(k=>k[0]+"→#"+k[1]).join("  ")} · dim slots are skipped (only even slots become frames)</div>`;
+  S.querySelector("button").onclick=()=>{sweep(keys);document.getElementById("sel").textContent="Wavetable "+t+": WAVE 4 → 124";document.getElementById("cmd").textContent=D.cmd+" build "+args};
+  const G=document.createElement("div");G.className="strip";
+  for(let s=0;s<61;s++){const id="t:"+t+":"+s;if(only&&!stars.has(id))continue;const isKey=keys.some(k=>k[0]===s),used=s%2===0;
+   G.append(card(id,used?"W"+(4+2*s):t+"/"+s,isKey?"key":"",slotCycle(keys,s),args,(isKey?"key ":"")+(used?"":"off")))}
   if(G.children.length){S.append(G);M.append(S)}})}
 document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render()});
 ["sort","hide","stars"].forEach(i=>document.getElementById(i).onchange=render);render();

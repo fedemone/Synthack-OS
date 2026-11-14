@@ -1,5 +1,10 @@
-"""Mod ppg-chord: onde nel formato PPG, livelli, patch; con l'OS stock anche SY CHORD nell'emulatore."""
+"""Mod ppg-chord: wavetable PPG nel banco di SY CHORD (31 frame, WAVE 4..124).
 
+Senza firmware: formato delle onde, condizionamento dei frame, disposizione del banco, patch,
+compatibilita' col banco "sy-chord" di MAX. Con l'OS stock: banco stock e SY CHORD nell'emulatore.
+"""
+
+import json
 import struct
 import sys
 from pathlib import Path
@@ -13,133 +18,126 @@ import make_patch as mp  # noqa: E402
 import waves  # noqa: E402
 
 STOCK = ROOT / "firmware" / "Syntakt_OS1.41.syx"
-SEC7_LEN = 383_760
+MAX_MANIFEST = ROOT / "tools" / "max" / "modular_builder" / "resources" / "modular-manifest.json"
 
 
-def fake_section7(table: np.ndarray) -> bytes:
-    sec = bytearray(SEC7_LEN)
-    struct.pack_into(">512i", sec, mp.TABLE_ADDR - mp.LOAD, *(int(v) for v in table))
-    return bytes(sec)
-
-
-def stock_like() -> np.ndarray:
-    return np.round(np.sin(2 * np.pi * np.arange(512) / 512) * 0.7 * 2 ** 31).astype(np.int64)
-
+# ------------------------------------------------------------ onde
 
 @pytest.mark.parametrize("name", list(waves.SPECTRA))
 def test_designed_waves_have_ppg_format(name):
     c = waves.design(name).cycle
     assert c.shape == (128,)
     assert np.allclose(c, -c[::-1] - 1)                    # seconda meta' = ~prima meta' rovesciata
-    assert np.allclose(c, np.round(c))                     # 8 bit
-    assert -128 <= c.min() and c.max() <= 127
-
-
-@pytest.mark.parametrize("name", list(waves.SPECTRA))
-@pytest.mark.parametrize("interp", ["fft", "step"])
-def test_table_is_512_peak_1_no_dc(name, interp):
-    t = waves.to_table(waves.design(name).cycle, interp)
-    assert t.shape == (512,)
-    assert np.isclose(np.max(np.abs(t)), 1.0)
-    assert abs(np.mean(t)) < 1e-9
-
-
-def test_fft_table_is_band_limited():
-    for name in waves.SPECTRA:
-        mag = np.abs(np.fft.rfft(waves.to_table(waves.design(name).cycle, "fft")))
-        assert mag[64:].max() < 1e-9 * mag.max(), name
+    assert np.allclose(c, np.round(c)) and -128 <= c.min() and c.max() <= 127
 
 
 def test_design_is_deterministic():
     assert np.array_equal(waves.design("vox").cycle, waves.design("vox").cycle)
 
 
-def test_level_follows_stock_rms_never_its_peak():
-    stock = stock_like()
-    for name in waves.SPECTRA:
-        y = waves.fit_level(waves.to_table(waves.design(name).cycle), stock).astype(float)
-        assert np.max(np.abs(y)) <= np.max(np.abs(stock)) + 1, name
-        rms, s_rms = np.sqrt(np.mean(y ** 2)), np.sqrt(np.mean(stock.astype(float) ** 2))
-        assert rms <= s_rms * 1.001, name
-        assert rms >= s_rms * 0.5, name                    # non troppo piu' piano dell'originale
+# ------------------------------------------------------------ frame e banco
+
+@pytest.mark.parametrize("name", list(waves.SPECTRA))
+def test_condition_starts_at_true_zero_and_is_band_limited(name):
+    c = waves.design(name).cycle
+    y = waves.condition(c, 40)
+    assert y.shape == (256,) and np.isclose(np.max(np.abs(y)), 1.0)
+    assert abs(y[0]) < 1e-9                                 # zero VERO (non forzato): niente clic
+    mag = np.abs(np.fft.rfft(y))
+    assert mag[41:].max() < 1e-9 * mag.max()                # nessuna armonica oltre il limite
+    assert abs(np.mean(y)) < 1e-9
 
 
-def test_rotation_matches_stock_ends():
-    stock = stock_like()
-    y = waves.fit_level(waves.to_table(waves.design("hollow").cycle), stock).astype(float)
-    step = np.max(np.abs(np.diff(y)))                      # passo massimo dentro il ciclo
-    assert abs(y[0] - stock[0]) <= step and abs(y[-1] - stock[-1]) <= 2 * step
+def test_condition_keeps_the_spectrum():
+    c = waves.design("glass").cycle
+    src = np.abs(np.fft.rfft(c - c.mean()))[1:64]
+    got = np.abs(np.fft.rfft(waves.condition(c, 63)))[1:64]
+    assert np.allclose(got / got.max(), src / src.max(), atol=1e-9)
 
 
-def test_build_spec_hash_and_bytes():
-    sec = fake_section7(stock_like())
-    spec, table = mp.build_spec(sec, waves.design("brass"))
-    p = spec["patches"][0]
-    assert p["section"] == 7 and int(p["addr"], 16) == mp.TABLE_ADDR and p["len"] == 2048
-    o = mp.TABLE_ADDR - mp.LOAD
-    assert p["expect_sha256"] == mp.sha(sec[o:o + 2048])
-    assert bytes.fromhex(p["hex"]) == mp.table_bytes(table)
-    assert list(struct.unpack(">512i", bytes.fromhex(p["hex"]))) == [int(v) for v in table]
+def test_condition_rejects_bad_band_limit():
+    with pytest.raises(ValueError):
+        waves.condition(waves.design("vox").cycle, 64)
 
 
-def test_build_spec_refuses_unexpected_bytes():
-    with pytest.raises(SystemExit):
-        mp.build_spec(bytes(SEC7_LEN), waves.design("brass"))
+def test_bank_frames_share_phase_and_format():
+    q = waves.bank_q31(waves.bank(waves.designed_cycles()))
+    assert q.shape == (31, 257)
+    assert (q[:, 0] == 0).all() and (q[:, 256] == 0).all()  # y[0] = 0, guardia = y[0]
+    assert np.abs(q).max(axis=1).max() == waves.PEAK
+    assert (np.abs(q).max(axis=1) >= waves.PEAK - 1).all()  # ogni frame a picco pieno
+    # stessa fase: frame vicini molto correlati (l'interpolazione di SY CHORD non cancella)
+    f = q[:, :256].astype(float)
+    corr = [np.dot(f[k], f[k + 1]) / np.linalg.norm(f[k]) / np.linalg.norm(f[k + 1]) for k in range(30)]
+    assert min(corr) > 0.8
 
 
-def test_ppg_rom_parser(tmp_path):
-    rng = np.random.default_rng(1)
-    rom = rng.integers(0, 256, size=(3, 64))
-    body = ",\n".join(", ".join(f"0x{v:02X}" for v in row) for row in rom)
-    f = tmp_path / "ppg_data.c"
-    f.write_text("#include <stdint.h>\nconst uint8_t ppg_wavetable[] = {1, 2};\n"
-                 f"const uint8_t ppg_waveforms[] = {{ /* onda 0 */\n{body}\n}};\n")
-    assert np.array_equal(waves.parse_ppg_rom(f), rom)
-    w = waves.from_ppg_rom(f, 2)
-    assert np.array_equal(w.cycle[:64], rom[2] - 128)
-    assert np.array_equal(w.cycle[64:], (255 - rom[2][::-1]) - 128)
+def test_designed_table_hits_keys():
+    cyc = waves.designed_cycles()
+    assert len(cyc) == 31
+    assert np.allclose(cyc[0], waves.design("hollow").cycle)       # posizione 0
+    assert np.allclose(cyc[30], waves.design("organ").cycle)       # posizione 60
+    assert np.allclose(cyc[5], waves.design("brass").cycle)        # posizione 10
 
 
-def test_chord_preview_renders():
-    x = mp.render_chord(waves.fit_level(waves.to_table(waves.design("organ").cycle), None), seconds=0.2)
-    assert x.shape == (int(0.2 * 48000),) and np.max(np.abs(x)) > 0.1
+# ------------------------------------------------------------ disposizione e patch
+
+def test_layout_matches_workbench():
+    assert mp.BANK_ADDR == 0x40016B80 and mp.BANK_LEN == 31868
+    # frame k a BANK_END - k*STEP (offset nella sezione 7), come in syntakt-fw.js
+    for k in (1, 17, 31):
+        assert mp.BANK_ADDR - mp.LOAD + mp.frame_offset(k) == 0x1E3FC - k * 0x404
+    assert not (mp.BANK_ADDR <= mp.SINE_ADDR < mp.BANK_ADDR + mp.BANK_LEN)   # WAVE 0 fuori
 
 
-# ------------------------------------------------------------ con l'OS stock
-
-needs_stock = pytest.mark.skipif(not STOCK.exists(), reason="firmware stock assente")
-
-
-@needs_stock
-def test_stock_table_is_a_wave():
-    ok, why = mp.looks_like_wave(mp.read_table(mp.load_section7(STOCK)))
-    assert ok, why
+def test_bank_bytes_roundtrip():
+    q = waves.bank_q31(waves.bank(waves.designed_cycles()))
+    region = mp.bank_bytes(q)
+    assert len(region) == mp.BANK_LEN
+    assert np.array_equal(mp.read_bank(region), q)
+    # il primo frame nella regione e' il 31 (WAVE 124)
+    assert list(struct.unpack_from(">257i", region, 0)) == [int(v) for v in q[30]]
 
 
-@needs_stock
-def test_emulated_sy_chord_follows_new_table():
-    pytest.importorskip("unicorn")
-    sec = mp.load_section7(STOCK)
-    _, table = mp.build_spec(sec, waves.design("hollow"))
-    stock = np.array(mp.emu_render(None, 48, 0.15), dtype=float)
-    new = np.array(mp.emu_render(mp.table_bytes(table), 48, 0.15), dtype=float)
-    assert np.max(np.abs(new)) > 0                          # suona
-    assert not np.allclose(stock, new)                      # e suona diverso
-    # il nuovo livello resta vicino a quello stock (stesso RMS della tabella, mai piu' picco)
-    assert np.sqrt(np.mean(new ** 2)) < 2.0 * np.sqrt(np.mean(stock ** 2))
+def test_spec_is_a_standard_patch():
+    q = waves.bank_q31(waves.bank(waves.designed_cycles()))
+    spec = mp.build_spec(q, "designed", 40)
+    (p,) = spec["patches"]
+    assert p["section"] == 7 and int(p["addr"], 16) == mp.BANK_ADDR and p["len"] == mp.BANK_LEN
+    assert len(bytes.fromhex(p["hex"])) == p["len"] and p["expect_sha256"] == mp.BANK_STOCK_SHA256
+    assert spec["conflicts"] == ["sy-chord"] and spec["wave"]["frames"]["124"] == "posizione 60"
 
 
-# ------------------------------------------------------------ wavetable e catalogo (ROM sintetica)
+@pytest.mark.skipif(not MAX_MANIFEST.exists(), reason="manifest di MAX assente")
+def test_same_region_and_stock_hash_as_max_sy_chord():
+    m = json.loads(MAX_MANIFEST.read_text())
+    chord = next(mod for mod in m["mods"] if mod["name"] == "sy-chord")
+    (sec7,) = [p for p in chord["patches"] if p["section"] == 7]
+    assert int(sec7["addr"], 16) == mp.BANK_ADDR and sec7["len"] == mp.BANK_LEN
+    assert sec7["expect_sha256"] == mp.BANK_STOCK_SHA256
+    # e il banco di MAX ha lo stesso formato che scriviamo noi: y[0] = guardia = 0, picco PEAK
+    q = mp.read_bank(bytes.fromhex(sec7["hex"]))
+    assert (q[:, 0] == 0).all() and (q[:, 256] == 0).all() and np.abs(q).max() == waves.PEAK
+
+
+def test_render_sweep():
+    q = waves.bank_q31(waves.bank(waves.designed_cycles()))
+    x = mp.render(q, seconds=0.3)
+    assert x.shape == (int(0.3 * 48000),) and np.max(np.abs(x)) > 0.1
+    held = mp.render(q, 64, 64, seconds=0.1, chord="note")
+    assert np.max(np.abs(held)) > 0.1
+
+
+# ------------------------------------------------------------ ROM sintetica (stesso formato C di wave-stuff)
 
 def synthetic_rom(tmp_path, n_waves=8):
-    """Stesso formato C di wave-stuff/data/ppg_data.c, dati nostri (onde sinusoidali con armoniche)."""
     ph = (np.arange(64) + 0.5) / 128
     rom = [np.clip(np.round(128 + 120 * np.sin(2 * np.pi * (k + 1) * ph) / (1 + 0.1 * k)), 0, 255).astype(int)
            for k in range(n_waves)]
     rom[5] = np.full(64, 128)                                     # onda vuota
     rom[6] = rom[1]                                               # duplicato
-    # tabella 0: chiavi 0->1, 30->2, 60->3 ; tabella 1: 0->4, 60->7
-    tables = [0x00, 1, 0, 2, 30, 3, 60, 0x01, 4, 0, 7, 60, 0xAD, 9, 33, 7, 54, 3, 72]   # + byte non-tabella in coda
+    # tabella 0: chiavi 0->1, 30->2, 60->3 ; tabella 1: 0->4, 60->7 ; poi byte che non sono tabelle
+    tables = [0x00, 1, 0, 2, 30, 3, 60, 0x01, 4, 0, 7, 60, 0xAD, 9, 33, 7, 54, 3, 72]
     fmt = lambda v: ",\n".join(f"\t0x{x:02x}, // c" for x in v)  # noqa: E731
     f = tmp_path / "ppg_data.c"
     f.write_text('#include <inttypes.h>\n#include "ppg_data.h"\n\n\n'
@@ -148,44 +146,120 @@ def synthetic_rom(tmp_path, n_waves=8):
     return f, np.array(rom)
 
 
-def test_wavetable_parser_and_slots(tmp_path):
+def test_rom_parsers(tmp_path):
     f, rom = synthetic_rom(tmp_path)
+    assert np.array_equal(waves.parse_ppg_rom(f), rom)
     assert waves.parse_ppg_wavetables(f) == [[(0, 1), (30, 2), (60, 3)], [(0, 4), (60, 7)]]
-    w, how = waves.from_ppg_table(f, 0, 30)                     # chiave esatta
+    w = waves.from_ppg_rom(f, 2)
+    assert np.array_equal(w.cycle[:64], rom[2] - 128)
+    assert np.array_equal(w.cycle[64:], (255 - rom[2][::-1]) - 128)
+
+
+def test_table_slots_interpolate(tmp_path):
+    f, rom = synthetic_rom(tmp_path)
+    w, how = waves.from_ppg_table(f, 0, 30)
     assert np.array_equal(w.cycle, waves.ppg_expand(rom[2])) and how == "onda 2"
-    w, how = waves.from_ppg_table(f, 0, 15)                     # a meta' fra 1 e 2
+    w, _ = waves.from_ppg_table(f, 0, 15)
     assert np.allclose(w.cycle, 0.5 * waves.ppg_expand(rom[1]) + 0.5 * waves.ppg_expand(rom[2]))
-    w, _ = waves.from_ppg_table(f, 1, 45)
-    assert np.allclose(w.cycle, 0.25 * waves.ppg_expand(rom[4]) + 0.75 * waves.ppg_expand(rom[7]))
     with pytest.raises(ValueError):
         waves.from_ppg_table(f, 2, 0)
-    with pytest.raises(ValueError):
-        waves.from_ppg_table(f, 0, 61)
 
 
-@pytest.mark.skip(reason="build disattivato finche' la patch non segue il banco a 32 frame")
-def test_cli_ppg_table_patch(tmp_path, monkeypatch):
+def test_table_to_31_frames(tmp_path):
+    f, rom = synthetic_rom(tmp_path)
+    cyc = waves.table_cycles(waves.parse_ppg_rom(f), waves.parse_ppg_wavetables(f)[0])
+    assert len(cyc) == 31
+    assert np.array_equal(cyc[0], waves.ppg_expand(rom[1]))         # WAVE 4  = posizione 0
+    assert np.array_equal(cyc[15], waves.ppg_expand(rom[2]))        # WAVE 64 = posizione 30
+    assert np.array_equal(cyc[30], waves.ppg_expand(rom[3]))        # WAVE 124 = posizione 60
+
+
+def test_cli_build_without_firmware(tmp_path, monkeypatch):
     f, _ = synthetic_rom(tmp_path)
-    monkeypatch.setattr(mp, "load_section7", lambda _: fake_section7(stock_like()))
     monkeypatch.setattr(mp, "HERE", tmp_path)
-    stock = tmp_path / "stock.syx"
-    stock.write_bytes(b"x")
-    assert mp.main(["build", "--stock", str(stock), "--ppg-rom", str(f), "--ppg-table", "0", "--ppg-slot", "15"]) == 0
-    import json
+    assert mp.main(["build", "--stock", str(tmp_path / "none.syx"), "--ppg-rom", str(f), "--ppg-table", "1"]) == 0
     spec = json.loads((tmp_path / "patch.json").read_text())
-    assert spec["wave"]["name"] == "wt00s15" and "0.50*onda 1 + 0.50*onda 2" in spec["wave"]["source"]
+    assert spec["wave"]["source"] == "ppg-wt01" and spec["patches"][0]["len"] == mp.BANK_LEN
+    assert mp.main(["build", "--stock", str(tmp_path / "none.syx"), "--designed", "vox", "glass"]) == 0
+
+
+def test_cli_preview_all(tmp_path):
+    f, _ = synthetic_rom(tmp_path)
+    out = tmp_path / "pv"
+    assert mp.main(["preview", "--ppg-rom", str(f), "--all", "--seconds", "0.2", "-o", str(out)]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["ppg-wt00_min.wav", "ppg-wt01_min.wav"]
 
 
 def test_catalog_page(tmp_path):
-    import json
     import catalog
     f, rom = synthetic_rom(tmp_path)
     out = tmp_path / "catalog.html"
-    n = catalog.build(f, out)
-    assert n == {"designed": len(waves.SPECTRA), "rom": len(rom), "tables": 2}
-    page = out.read_text()
-    data = json.loads(page.split("const D=", 1)[1].split(";\n", 1)[0])
+    assert catalog.build(f, out) == {"designed": len(waves.SPECTRA), "rom": len(rom), "tables": 2}
+    data = json.loads(out.read_text().split("const D=", 1)[1].split(";\n", 1)[0])
     assert data["rom"][5]["empty"] == 1 and data["rom"][6]["dup"] == 1
     assert data["tables"] == [[[0, 1], [30, 2], [60, 3]], [[0, 4], [60, 7]]]
-    assert len(data["romCycles"]) == 4 * ((len(rom) * 128 + 2) // 3)
     assert catalog.build(None, tmp_path / "d.html")["rom"] == 0
+
+
+# ------------------------------------------------------------ con l'OS stock
+
+needs_stock = pytest.mark.skipif(not STOCK.exists(), reason="firmware stock assente")
+
+
+@needs_stock
+def test_stock_bank_hash_and_format():
+    region = mp.stock_region(mp.load_section7(STOCK))
+    q = mp.read_bank(region)
+    assert (q[:, 0] == 0).all() and (q[:, 256] == q[:, 0]).all()
+
+
+@needs_stock
+def test_emulated_sy_chord_plays_new_bank():
+    pytest.importorskip("unicorn")
+    q = waves.bank_q31(waves.bank(waves.designed_cycles()))
+    stock = np.array(mp.emu_render(None, 64, 48, 0.15), dtype=float)
+    new = np.array(mp.emu_render(mp.bank_bytes(q), 64, 48, 0.15), dtype=float)
+    assert np.max(np.abs(new)) > 0 and not np.allclose(stock, new)
+
+
+# ------------------------------------------------------------ tools/build/build.py con MAX
+
+@pytest.mark.skipif(not MAX_MANIFEST.exists(), reason="manifest di MAX assente")
+def test_build_py_reads_max_mods_and_refuses_both_banks(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / "tools" / "build"))
+    import build
+    assert build.mod_spec("max:sy-chord")["name"] == "sy-chord"
+    with pytest.raises(build.BuildError):
+        build.mod_spec("max:nope")
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    mp.main(["build", "--stock", str(tmp_path / "none.syx"), "--designed"])
+    build.check_selection([tmp_path, "max:deja-vu"])                     # insieme: ok
+    with pytest.raises(build.BuildError, match="sy-chord"):
+        build.check_selection([tmp_path, "max:sy-chord"])
+    # anche le patch, a prescindere da "conflicts", si sovrappongono: il build le rifiuterebbe
+    ours = build.load_mod(tmp_path, "1.41")[0]
+    theirs = [p for p in build.load_mod("max:sy-chord", "1.41") if p.section == 7][0]
+    assert (ours.section, ours.offset, ours.end) == (theirs.section, theirs.offset, theirs.end)
+    assert ours.expect_sha256 == theirs.expect_sha256
+
+
+# ------------------------------------------------------------ builder modulare di MAX (Windows) con patch locale
+
+@pytest.mark.skipif(not MAX_MANIFEST.exists(), reason="manifest di MAX assente")
+def test_modular_builder_accepts_local_ppg_patch(tmp_path, monkeypatch):
+    sys.path.insert(0, str(ROOT / "tools" / "max" / "modular_builder"))
+    import modular_builder as modular
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    mp.main(["build", "--stock", str(tmp_path / "none.syx"), "--designed"])
+    local = (modular.load_local_mod(tmp_path),)
+    full = modular.PRESETS["Original MAX 1.0"]
+    with pytest.raises(modular.BuildError, match="SY CHORD Wave Bank"):
+        modular.selected_manifest(full, local=local)
+    names = [m["name"] for m in modular.selected_manifest(full - {"sy_chord"}, local=local)["mods"]]
+    assert names[-1] == "ppg-chord" and "sy-chord" not in names and "deja-vu" in names
+    assert [m["name"] for m in modular.selected_manifest(frozenset(), local=local)["mods"]] == ["ppg-chord"]
+    assert modular.profile_name(full - {"sy_chord"}, local) == "CUSTOM + ppg-chord"   # nessun hash "golden"
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"name": "x", "os": "1.41", "patches": [{"section": 3, "append": True}]}))
+    with pytest.raises(modular.BuildError):
+        modular.load_local_mod(bad)

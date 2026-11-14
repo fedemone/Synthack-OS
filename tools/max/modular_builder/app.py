@@ -7,7 +7,8 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from modular_builder import FEATURES, PRESETS, BuildError, build, digest_path, resolve
+from modular_builder import (FEATURES, PRESETS, BuildError, build, digest_path, load_local_mod,
+                             selected_manifest)
 
 STOCK_HASH = "8e2488f462c4a5656396a895f113bcd415e9900fa8709340dccf45d4cb9ed19e"
 
@@ -17,7 +18,7 @@ class App(ttk.Frame):
         super().__init__(root, padding=18)
         self.grid(sticky="nsew")
         root.title("Syntakt MAX Modular Builder")
-        root.minsize(720, 570)
+        root.minsize(720, 640)
         root.columnconfigure(0, weight=1)
         self.source = tk.StringVar()
         self.status = tk.StringVar(value="Choose your official Syntakt OS 1.41 file.")
@@ -25,6 +26,7 @@ class App(ttk.Frame):
         self.preset = tk.StringVar(value="MAX FULL + FM4")
         self.enabled = {key: tk.BooleanVar(value=key in PRESETS["MAX FULL + FM4"])
                         for key, _, _ in FEATURES}
+        self.local_path = tk.StringVar()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         ttk.Label(self, text="Syntakt MAX Modular Builder", font=("Segoe UI", 16, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
@@ -47,11 +49,19 @@ class App(ttk.Frame):
             ttk.Checkbutton(grid, text=label, variable=self.enabled[key],
                             command=self.feature_changed).grid(row=index // 2, column=index % 2,
                                                                sticky="w", padx=(0, 35), pady=3)
-        ttk.Label(self, textvariable=self.compatibility, wraplength=670).grid(row=8, column=0, columnspan=3,
+        local = ttk.LabelFrame(self, text="Local patch (optional), e.g. PPG wavetable: mods/ppg-chord/patch.json",
+                               padding=10)
+        local.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        local.columnconfigure(0, weight=1)
+        ttk.Entry(local, textvariable=self.local_path).grid(row=0, column=0, sticky="ew")
+        ttk.Button(local, text="Choose…", command=self.choose_local).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(local, text="Clear", command=lambda: (self.local_path.set(""), self.refresh())).grid(
+            row=0, column=2, padx=(8, 0))
+        ttk.Label(self, textvariable=self.compatibility, wraplength=670).grid(row=9, column=0, columnspan=3,
                                                                               sticky="w", pady=(12, 10))
         self.go = ttk.Button(self, text="Build and Save Firmware", command=self.start)
-        self.go.grid(row=9, column=0, sticky="w")
-        ttk.Label(self, textvariable=self.status, wraplength=670).grid(row=10, column=0, columnspan=3,
+        self.go.grid(row=10, column=0, sticky="w")
+        ttk.Label(self, textvariable=self.status, wraplength=670).grid(row=11, column=0, columnspan=3,
                                                                        sticky="w", pady=(14, 0))
         self.refresh()
         self.after(120, self.poll)
@@ -70,11 +80,23 @@ class App(ttk.Frame):
         self.preset.set("CUSTOM")
         self.refresh()
 
+    def local(self) -> tuple[dict, ...]:
+        return (load_local_mod(self.local_path.get()),) if self.local_path.get() else ()
+
+    def choose_local(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("Patch", "patch.json"), ("JSON", "*.json")])
+        if path:
+            self.local_path.set(path)
+            self.refresh()
+
     def refresh(self) -> None:
         try:
-            mods = resolve(self.selection())
+            local = self.local()
+            mods = selected_manifest(self.selection(), local=local)["mods"]
             dependencies = [mod["name"] for mod in mods if mod["name"] in ("modarea", "vparams", "splash")]
             note = "Automatic support: " + (", ".join(dependencies) if dependencies else "none needed")
+            if local:
+                note += ". Local: " + ", ".join(mod["name"] for mod in local)
             if "fm4" in self.selection():
                 note += ". FM4 uses the heap-reserved loader."
             self.compatibility.set(note)
@@ -100,25 +122,28 @@ class App(ttk.Frame):
             return
         selected = self.selection()
         try:
-            resolve(selected)
+            local = self.local()
+            selected_manifest(selected, local=local)
         except BuildError as error:
             messagebox.showerror("Syntakt MAX", str(error))
             return
         name = "Syntakt_OS1.41_" + ("MAX_FM4" if selected == PRESETS["MAX FULL + FM4"] else
                                              "MAX_1.0" if selected == PRESETS["Original MAX 1.0"] else
-                                             "FM4" if selected == PRESETS["FM4 ONLY"] else "CUSTOM") + ".syx"
+                                             "FM4" if selected == PRESETS["FM4 ONLY"] else "CUSTOM")
+        name += ("_" + "_".join(mod["name"] for mod in local) if local else "") + ".syx"
         output = filedialog.asksaveasfilename(defaultextension=".syx", initialfile=name,
                                               filetypes=[("SysEx firmware", "*.syx")])
         if not output:
             return
         self.go.state(["disabled"])
         self.status.set("Starting local build…")
-        threading.Thread(target=self.worker, args=(self.source.get(), output, selected), daemon=True).start()
+        threading.Thread(target=self.worker, args=(self.source.get(), output, selected, local),
+                         daemon=True).start()
 
-    def worker(self, source: str, output: str, selected: frozenset[str]) -> None:
+    def worker(self, source: str, output: str, selected: frozenset[str], local=()) -> None:
         try:
             self.events.put(("ok", build(source, output, selected,
-                                         lambda value: self.events.put(("progress", value)))))
+                                         lambda value: self.events.put(("progress", value)), local)))
         except Exception as error:
             self.events.put(("error", str(error)))
 

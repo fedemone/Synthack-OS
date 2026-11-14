@@ -22,6 +22,12 @@ Unofficial community mod bundle for **Elektron Syntakt OS 1.41**, built locally 
 
 The exact 31-wave list is in the release notes. MAX is a fixed build, not the Workbench wave editor. Existing sounds using replaced waves will change timbre. **SY FM4 is not included**: it remains separate development, with unresolved complete page-2 editing and no unified hardware-tested build.
 
+## PPG wavetable for SY CHORD (this fork)
+
+[`mods/ppg-chord`](mods/ppg-chord) puts a **PPG-style wavetable** into SY CHORD's 31-frame bank: turning WAVE 4 → 124 scans the table, like a PPG Wave. It **replaces** the 31-wave bank above, since both write the same region. Screen pictures stay stock and WAVE 0 is unchanged. Choose one of the 29 tables from your local copy of [wave-stuff](https://github.com/Jacajack/wave-stuff)'s data, or use our 7 designed waves. Browse and hear every table first with the local catalog page.
+
+Build with `tools/build/build.py`, where MAX features are available as `max:<name>`, or add `mods/ppg-chord/patch.json` as a *Local patch* in the modular builder with *SY CHORD Wave Bank* unticked. Details: [mods/ppg-chord](mods/ppg-chord).
+
 ## Credits and source
 
 Original SyntHack mods and heap-based infrastructure: [Angelo-politek and contributors](https://github.com/Angelo-politek/Synthack-OS). Déjà Vu and SY CHORD implementation: [Bezronczek / Firmware Workbench](https://github.com/Bezronczek/syntakt-firmware-workbench). MAX integration, fixed bank recipes and Windows builder: Kári Garðarsson's fork, developed with Codex assistance. Container tooling: [Marcel Bierling / elektron-firmware-tool](https://github.com/mischa85/elektron-firmware-tool).

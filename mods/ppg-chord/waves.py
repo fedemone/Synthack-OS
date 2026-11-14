@@ -9,8 +9,9 @@ Le onde in WAVES sono nostre (spettri scritti a mano). In alternativa from_ppg_r
 copia LOCALE dei dati di wave-stuff (data/ppg_data.c) che l'utente mette in local/ (git-ignored):
 quei byte non stanno nel repo.
 
-Uscita: 512 campioni int32 Q31, il formato della tabella che SY CHORD legge a 0x4001A300
-(docs/audio-path.md).
+Uscita: un banco di 31 frame (256 campioni + guardia, int32) per i valori WAVE 4, 8 ... 124 di
+SY CHORD; SY CHORD interpola fra frame vicini, quindi girare WAVE scorre la wavetable come sul PPG.
+Formato del banco: docs/audio-path.md (da syntakt-firmware-workbench).
 """
 
 from __future__ import annotations
@@ -200,48 +201,74 @@ def from_ppg_table(path: Path, table: int, slot: int) -> tuple[Wave, str]:
     return Wave(f"wt{table:02d}s{slot:02d}", cycle), how
 
 
-def to_table(cycle: np.ndarray, interp: str = "fft") -> np.ndarray:
-    """128 -> 512 campioni float, picco 1, senza componente continua.
+# --- banco di SY CHORD (formato misurato da syntakt-firmware-workbench, Bezronczek, MIT)
+FRAMES, FRAME_SAMPLES = 31, 256            # WAVE 4, 8 ... 124; 256 campioni + 1 di guardia
+PEAK = 0x7FFF0000                          # picco di ogni frame, come i frame stock
+TABLE_POSITIONS = list(range(0, SLOTS, 2))  # 0, 2 ... 60: 31 posizioni = 31 frame, esatto
+assert len(TABLE_POSITIONS) == FRAMES
 
-    fft:  interpolazione a banda limitata (armoniche <= 63, grana degli 8 bit compresa): pulito.
-    step: ogni campione ripetuto 4 volte, come un lettore a 8 bit senza interpolazione:
-          aggiunge immagini sopra la 64a armonica, piu' "sporco" e brillante.
+
+def condition(cycle: np.ndarray, harmonics: int = 40) -> np.ndarray:
+    """Ciclo PPG (128) -> frame di 256 campioni: banda limitata, ruotato di mezzo ciclo, picco 1.
+
+    Le onde PPG sono dispari attorno a meta' ciclo (x[n] = -x[127-n] - 1): la versione a banda
+    limitata passa per zero ESATTAMENTE a meta' ciclo. Ruotando di mezzo ciclo ogni frame inizia da
+    0 (come vuole il formato, y[0] = 0) e tutti i frame hanno la stessa fase: SY CHORD interpola fra
+    frame vicini senza cancellazioni.
     """
-    x = np.asarray(cycle, dtype=np.float64) - np.mean(cycle)
-    if interp == "fft":
-        spec = np.fft.rfft(x)
-        spec[HALF] = 0                                   # Nyquist dei 128 campioni: via
-        big = np.zeros(TABLE // 2 + 1, dtype=complex)
-        big[:HALF + 1] = spec
-        y = np.fft.irfft(big, n=TABLE) * (TABLE / CYCLE)
-    elif interp == "step":
-        y = np.repeat(x, TABLE // CYCLE)
-        y -= np.mean(y)
-    else:
-        raise ValueError(f"interp: 'fft' o 'step', non '{interp}'")
-    return y / np.max(np.abs(y))
+    if not 1 <= harmonics <= HALF - 1:
+        raise ValueError(f"harmonics: 1..{HALF - 1} (le onde PPG non hanno armoniche oltre la 63a)")
+    spec = np.fft.rfft(np.asarray(cycle, dtype=np.float64))
+    spec[0] = 0
+    spec[harmonics + 1:] = 0
+    k = np.arange(spec.size)
+    spec *= np.exp(2j * np.pi * k * ((CYCLE - 1) / 2) / CYCLE)   # x(t + 63.5): lo zero di simmetria va a t = 0
+    big = np.zeros(FRAME_SAMPLES // 2 + 1, dtype=complex)
+    big[:spec.size] = spec
+    y = np.fft.irfft(big, n=FRAME_SAMPLES)
+    peak = np.max(np.abs(y))
+    if peak < 1e-9:
+        raise ValueError("onda vuota")
+    return y / peak
 
 
-def fit_level(table: np.ndarray, stock: np.ndarray | None, gain_db: float = 0.0) -> np.ndarray:
-    """Scala la tabella (float, picco 1) in Q31.
+def bank(cycles: list[np.ndarray], harmonics: int = 40) -> np.ndarray:
+    """31 cicli PPG -> (31, 256) float. Una sola polarita' per tutto il banco: in salita da 0
+    (pendenza media positiva), come i frame stock; invertire tutto il banco non si sente."""
+    if len(cycles) != FRAMES:
+        raise ValueError(f"servono {FRAMES} cicli, non {len(cycles)}")
+    frames = np.array([condition(c, harmonics) for c in cycles])
+    if np.sum(frames[:, 1] - frames[:, -1]) < 0:
+        frames = -frames
+    frames[:, 0] = 0.0
+    return frames
 
-    Con la tabella stock: stesso valore efficace (volume percepito simile), MAI oltre il suo picco
-    (gli accordi sommano piu' voci: piu' picco = rischio di saturazione). Senza: picco -1 dBFS.
-    Poi ruota il ciclo (cambio di fase, inudibile) perche' inizio e fine combacino con quelli stock:
-    se il motore legge un campione di guardia dopo la tabella, non trova un salto.
-    """
-    if stock is None:
-        target = 10 ** (-1 / 20) * 2 ** 31
-        return np.round(table * target * 10 ** (gain_db / 20)).astype(np.int64)
-    stock = np.asarray(stock, dtype=np.float64)
-    s_peak = np.max(np.abs(stock))
-    s_rms = np.sqrt(np.mean(stock ** 2))
-    rms = np.sqrt(np.mean(table ** 2))
-    scale = min(s_rms / rms * 10 ** (gain_db / 20), s_peak)
-    y = table * scale
-    cost = np.abs(y - stock[0]) + np.abs(np.roll(y, 1) - stock[-1])
-    y = np.roll(y, -int(np.argmin(cost)))
-    return np.clip(np.round(y), -(2 ** 31), 2 ** 31 - 1).astype(np.int64)
+
+def bank_q31(frames: np.ndarray) -> np.ndarray:
+    """(31, 256) float -> (31, 257) int32: picco PEAK, campione di guardia = y[0] = 0."""
+    q = np.round(np.asarray(frames) * PEAK).astype(np.int64)
+    q[:, 0] = 0
+    return np.concatenate([q, q[:, :1]], axis=1)
+
+
+def table_cycles(rom: np.ndarray, keys: list[tuple[int, int]]) -> list[np.ndarray]:
+    """Le 31 posizioni pari di una wavetable PPG (interpolate fra le chiavi come fa il PPG)."""
+    return [table_slot_cycle(rom, keys, p)[0] for p in TABLE_POSITIONS]
+
+
+def designed_cycles(names: list[str] | None = None) -> list[np.ndarray]:
+    """Wavetable fatta con le onde progettate: chiavi distribuite su 0..60, interpolate."""
+    names = names or list(SPECTRA)
+    if len(names) < 2:
+        raise ValueError("servono almeno due onde")
+    cyc = [design(n).cycle for n in names]
+    pos = np.linspace(0, SLOTS - 1, len(names))
+    out = []
+    for p in TABLE_POSITIONS:
+        j = min(int(np.searchsorted(pos, p, side="right")) - 1, len(names) - 2)
+        t = (p - pos[j]) / (pos[j + 1] - pos[j])
+        out.append((1 - t) * cyc[j] + t * cyc[j + 1])
+    return out
 
 
 def harmonics(table: np.ndarray, n: int = 12) -> list[tuple[int, float]]:

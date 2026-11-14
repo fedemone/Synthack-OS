@@ -79,7 +79,29 @@ def resolve(selection, manifest: dict | None = None) -> list[dict]:
     return result
 
 
-def profile_name(selection) -> str:
+def load_local_mod(path) -> dict:
+    """A locally generated patch, e.g. mods/ppg-chord/patch.json (a folder or the file itself).
+
+    It is stock-guarded like the bundled mods. It may only replace bytes in place (no appended
+    code), and its "conflicts" list names bundled mods it cannot be combined with.
+    """
+    path = Path(path)
+    if path.is_dir():
+        path = path / "patch.json"
+    try:
+        mod = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise BuildError(f"cannot read local patch {path}: {error}") from error
+    if mod.get("os") != "1.41" or not mod.get("name") or not mod.get("patches"):
+        raise BuildError(f"{path}: not an OS 1.41 patch file")
+    if any(p.get("append") or p.get("section") not in (3, 7) for p in mod["patches"]):
+        raise BuildError(f"{mod['name']}: local patches may only replace bytes in sections 3 and 7")
+    return mod
+
+
+def profile_name(selection, local=()) -> str:
+    if local:
+        return "CUSTOM + " + " + ".join(mod["name"] for mod in local)
     chosen = frozenset(selection)
     for name, features in PRESETS.items():
         if chosen == features:
@@ -87,9 +109,19 @@ def profile_name(selection) -> str:
     return "CUSTOM"
 
 
-def selected_manifest(selection, manifest: dict | None = None) -> dict:
+def selected_manifest(selection, manifest: dict | None = None, local=()) -> dict:
     manifest = manifest or load_manifest()
-    mods = resolve(selection, manifest)
+    mods = resolve(selection, manifest) if selection or not local else []
+    bundled = {mod["name"] for mod in mods}
+    labels = {mod: label for _, label, mod in FEATURES}
+    for extra in local:
+        if extra["name"] in bundled or extra["name"] in labels:
+            raise BuildError(f"local patch {extra['name']} has the name of a bundled mod")
+        clash = sorted(set(extra.get("conflicts", ())) & bundled)
+        if clash:
+            raise BuildError(f"{extra['name']} replaces " + ", ".join(labels.get(c, c) for c in clash)
+                             + ": untick it to use the local patch")
+    mods = [*mods, *local]
     return {
         "format": 2,
         "os": "1.41",
@@ -98,9 +130,10 @@ def selected_manifest(selection, manifest: dict | None = None) -> dict:
     }
 
 
-def validate_static(selection, stock_sections: dict[int, bytes], manifest: dict | None = None) -> dict:
+def validate_static(selection, stock_sections: dict[int, bytes], manifest: dict | None = None,
+                    local=()) -> dict:
     """Check patch preimages, ownership, CPU2 guard and heap placement."""
-    chosen = selected_manifest(selection, manifest)
+    chosen = selected_manifest(selection, manifest, local)
     sections = {sid: bytearray(data) for sid, data in stock_sections.items()}
     base.apply(sections, chosen["mods"])
     layout = next((mod["layout"] for mod in chosen["mods"] if mod.get("layout", {}).get("compress") == "shlz"), None)
@@ -125,11 +158,11 @@ def validate_static(selection, stock_sections: dict[int, bytes], manifest: dict 
             "modarea_bytes": area_bytes}
 
 
-def build(stock, destination, selection, progress=lambda _: None) -> dict:
+def build(stock, destination, selection, progress=lambda _: None, local=()) -> dict:
     stock = Path(stock)
     destination = Path(destination)
     manifest = load_manifest()
-    chosen = selected_manifest(selection, manifest)
+    chosen = selected_manifest(selection, manifest, local)
     if digest_path(stock) != manifest["stock_sha256"]:
         raise BuildError("selected file is not the verified official Syntakt OS 1.41 image")
     if destination.suffix.lower() != ".syx":
@@ -146,7 +179,7 @@ def build(stock, destination, selection, progress=lambda _: None) -> dict:
         work = Path(name)
         files = base.unpack(stock, work / "stock", [3, 7])
         original = {sid: path.read_bytes() for sid, path in files.items()}
-        checked = validate_static(selection, original, manifest)
+        checked = validate_static(selection, original, manifest, local)
         sections = {sid: bytearray(data) for sid, data in original.items()}
         progress("Applying guarded feature patches")
         base.apply(sections, chosen["mods"])
@@ -180,7 +213,7 @@ def build(stock, destination, selection, progress=lambda _: None) -> dict:
             if decoded[sid].read_bytes() != bytes(sections[sid]):
                 raise BuildError(f"section {sid} differs after container packing")
         got = digest_path(candidate)
-        profile = profile_name(selection)
+        profile = profile_name(selection, local)
         expected = manifest.get("golden_sha256", {}).get(profile)
         if expected and got != expected:
             raise BuildError(f"{profile} differs from its pinned expected output")

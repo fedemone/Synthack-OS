@@ -1,87 +1,70 @@
-# ppg-chord
+# ppg-chord: PPG wavetable for SY CHORD
 
-Replaces the single-cycle wave of **SY CHORD** with a PPG-style digital wave, aimed at 80s synth-pop / EBM chords: bright, hollow, nasal, a bit grainy.
+This mod puts a **PPG-style wavetable** into SY CHORD's wave bank. Turning **WAVE** from 4 to 124 then sweeps through the table, and SY CHORD blends neighbouring frames, much as the PPG Wave scans its tables. You can p-lock WAVE or modulate it like any other machine parameter.
 
-- **What changes:** the 512 × int32 (Q31) table SY CHORD reads at `0x4001A300`, in section 7 (voice engine, CPU #2). 2048 bytes of data, no code.
-- **CPU cost:** zero. The engine reads the same table at the same rate.
-- **Needs:** nothing else. This works with or without the other mods.
+- **Replaces:** MAX's *SY CHORD Wave Bank*. It writes the same region, so you use one or the other (see [Builds](#builds)).
+- **Unchanged:** WAVE 0 (a sine shared with other machines), every other machine, and the screen pictures. The small wave picture for WAVE still shows the stock shapes, by choice.
+- **Cost:** data only, no code, no CPU load.
+- **Existing sounds:** those that use SY CHORD with WAVE above 0 will sound different.
 
-## The waves
+## How a PPG table becomes the bank
 
-They are built in the **PPG Wave 2.x wave format**, as documented by [wave-stuff](https://github.com/Jacajack/wave-stuff):
+| PPG Wave | SY CHORD bank |
+|---|---|
+| 61 positions per wavetable; key waves at some positions, interpolated in between | 31 frames, WAVE 4, 8 … 124; SY CHORD interpolates in between |
+| each wave: 64 8-bit samples per half cycle, mirrored and inverted to 128 | each frame: 256 samples + 1 guard sample, int32, peak `0x7FFF0000`, starting at 0 |
 
-- 64 unsigned 8-bit samples per half cycle;
-- the second half is the first half reversed and inverted (`~w[127-p]`), giving odd symmetry around mid-cycle;
-- 128 samples per cycle, carrying the grain of 8-bit samples.
+- **Positions:** positions 0, 2, … 60 become frames 1 … 31, which is exactly 31. Wavetables with a key wave at every second position (16, 26 and 27 in wave-stuff's data) keep every key wave.
+- **Band limit:** each frame is band-limited, 40 harmonics by default, as in Workbench. `--harmonics` goes up to 63, the most a PPG wave has. SY CHORD uses the same frame for every note, so brighter means more aliasing on high notes.
+- **Phase:** every PPG wave has odd symmetry around mid-cycle, so its band-limited version crosses zero exactly there. Each frame is rotated by that half cycle, so all frames start at a true 0 with the same phase. SY CHORD's blending between frames then never cancels out.
+- **Polarity:** one polarity for the whole bank, decided by majority.
 
-They are then stretched to 512 samples, band-limited by default, and leveled to the stock wave. The spectra are our own (`waves.py`):
+The bank layout comes from [syntakt-firmware-workbench](https://github.com/Bezronczek/syntakt-firmware-workbench) (Bezronczek, MIT), measured on hardware; see [docs/audio-path.md](../../docs/audio-path.md). The PPG format comes from [wave-stuff](https://github.com/Jacajack/wave-stuff).
 
-| Wave | Character | Try it for |
-|---|---|---|
-| `hollow` | odd harmonics + formant on the 7th: nasal square | pads, arpeggios (default) |
-| `brass` | saw with a peak on the 5th–7th | stabs |
-| `vox` | three fixed formants: digital "aah" | choir pads |
-| `glass` | sparse harmonics 1-2-5-9-14-23-31 | bells, metallic plucks |
-| `reso` | saw through a resonant low-pass frozen on the 12th | the "frozen sweep" sound |
-| `sync` | hard-sync spectrum (ratio 3.7) | aggressive leads, EBM bass |
-| `organ` | drawbars 1-2-3-4-6-8 | wide, clean chords |
+## Sources
 
-![waves](waves.png)
+- **A PPG wavetable** (0–28) from your **local** copy of wave-stuff's `data/ppg_data.c`. Keep it in `local/` (git-ignored). A `patch.json` built from it contains data derived from that ROM.
+- **Our 7 designed waves** (`--designed`): hollow, brass, vox, glass, reso, sync, organ. They are spread over the table in order and interpolated. You can give your own order, for example `--designed vox glass reso`. These need no ROM, and the committed `patch.json` is this table.
 
-Formants are fixed to harmonic numbers, not to frequencies. A wave keeps its character up and down the keyboard, the way a single PPG wave does.
-
-## All the waves: the catalog
-
-The 7 waves above are our own. To choose from **everything**, use the catalog. Put your copy of wave-stuff's `data/ppg_data.c` in `local/` (git-ignored) and run:
-
-```sh
-python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c    # -> out/ppg-chord/catalog.html
-```
-
-It writes one self-contained page with three tabs:
-
-- **Designed:** the 7 waves above.
-- **ROM waves:** all 256 PPG waves. Each shows a brightness score (spectral centroid, in harmonics); empty waves and duplicates are hidden by default. Sort by number or brightness.
-- **Wavetables:** all 29 tables × 61 slots. Key waves are outlined, and the slots between them are interpolated as the PPG does. That's ~1,800 more waves.
-
-Click a wave to hear it as a chord. Chord type and root are selectable; playback is Web Audio, band-limited like `--interp fft`. The footer shows the exact `build` command for that wave. ★ shortlists a wave; the shortlist stays in your browser.
-
-The page contains the ROM data read from your local file. It lives in `out/`, so keep it out of the repo.
+![designed waves](waves.png)
 
 ## Use
 
 ```sh
-python mods/ppg-chord/make_patch.py list
-python mods/ppg-chord/make_patch.py preview                 # WAV chords per wave in out/ppg-chord/preview (no firmware needed)
-python mods/ppg-chord/make_patch.py preview --chord sus4 --root 43
-python mods/ppg-chord/make_patch.py build --ppg-rom local/ppg_data.c --ppg-index 23
-python mods/ppg-chord/make_patch.py build --ppg-rom local/ppg_data.c --ppg-table 5 --ppg-slot 30
-python mods/ppg-chord/make_patch.py build --wave vox         # writes patch.json (needs firmware/Syntakt_OS1.41.syx)
-python mods/ppg-chord/make_patch.py build --wave vox --emu   # + SY CHORD rendered by the original engine, stock vs new
-python tools/build/build.py --stock firmware/Syntakt_OS1.41.syx mods/ppg-chord ... -o out/synthack.syx
+python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c    # out/ppg-chord/catalog.html
+python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --all   # one WAV per table: chord sweeping WAVE 4 -> 124
+python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --ppg-table 5 --hold 64
+python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-table 5    # writes patch.json
+python mods/ppg-chord/make_patch.py build   --designed
 ```
 
-With the stock OS in `firmware/`, `preview` also renders the **stock** wave (`stock_min.wav`) for A/B.
+`build` needs no firmware: the stock hash of the region is the one MAX's bank declares, and every build checks it again against your OS. With `firmware/Syntakt_OS1.41.syx` present, `build` also checks the stock bank right away. Add `--emu` to also render SY CHORD with the original engine, before and after.
 
-### Options
+**The catalog** is one local page with every wave:
+- **Designed:** the 7 designed waves.
+- **ROM waves:** the 256 ROM waves, browse only.
+- **Wavetables:** the 29 tables. Each has a **▶ sweep** button that plays WAVE 4 → 124, and the slots that become frames are labelled W4 … W124.
 
-- `--interp fft` (default): clean, band-limited, no harmonics above the 63rd.
-- `--interp step`: each 8-bit sample held 4×, like a non-interpolating 8-bit player. Brighter and dirtier, with some aliasing on high notes.
-- `--bits 16`: skip the 8-bit quantisation for a cleaner wave.
-- `--gain-db`: level trim. The level is matched to the stock wave's RMS and never goes above the stock peak, because chords sum several voices.
-- `--ppg-rom local/ppg_data.c --ppg-table T --ppg-slot S`: use slot S (0–60) of wavetable T, interpolated between its key waves.
-- `--ppg-rom local/ppg_data.c --ppg-index N`: use wave N from your own local copy of wave-stuff's `data/ppg_data.c`. Keep it in `local/`, which is git-ignored. A `patch.json` built this way contains bytes derived from that data.
+The footer shows the `build` command for the table you picked. ★ shortlists a wave in your browser. The page contains ROM data from your local file and is written to `out/`.
 
-### Checks done by `build`
+## Builds
 
-- The section 7 hash must be OS 1.41.
-- The stock table must look like a wave: amplitude, no DC, no jumps.
-- The 2 KB blocks around it are scanned and listed if they also look like waves. If they do, SY CHORD's WAV parameter may pick among several tables; check the disassembly before patching them.
-- The new cycle is phase-rotated so that its first and last samples meet the stock ones. If the engine reads a guard sample past the table, it finds no step there.
+**Linux / WSL** (`tools/build/build.py`): MAX's features are available as `max:<name>`. To build the MAX set with the PPG wavetable instead of MAX's bank:
+
+```sh
+python tools/build/build.py --stock firmware/Syntakt_OS1.41.syx \
+    max:splash max:dual-mono max:modarea max:vparams max:master-comp max:readable-values \
+    max:beat-repeat max:fx3 max:deja-vu mods/ppg-chord -o out/max-ppg.syx
+```
+
+Add `max:fm4` for SY FM4. `ppg-chord` together with `max:sy-chord` is refused, both through `"conflicts"` and through the overlap check.
+
+**Windows modular builder** (`tools/max/modular_builder`): under *Local patch* choose `mods/ppg-chord/patch.json` and untick *SY CHORD Wave Bank*. The builder refuses to combine the two. A build with a local patch is reported as profile `CUSTOM + ppg-chord` and has no pinned "golden" hash. The packaged `.exe` has to be rebuilt from source (`build_windows.ps1`) to get this option.
 
 ## Status
 
-- ✅ Wave design, format, levels, patch generation: `tests/test_ppg_chord.py`, runs without firmware.
-- ⬜ Emulator check with the stock section 7 (`test_emulated_sy_chord_follows_new_table`): skipped until the stock OS is in `firmware/`.
+- ✅ Bank layout, frame format, conditioning, patch, and compatibility with MAX's manifest: `tests/test_ppg_chord.py`. It checks that MAX's bank occupies the same region, has the same stock hash and uses the same frame format. These run without firmware.
+- ✅ All 29 real wave-stuff tables convert (checked locally).
+- ⬜ Emulator tests with the stock OS: skipped until it is in `firmware/`.
+- ⬜ Windows GUI change: syntax-checked only, not run.
 - ⬜ Not yet tried on hardware.
-- **Known unknown:** whether *all* SY CHORD WAV settings use this table, or only one. `build` prints the neighbouring tables to help find out.
