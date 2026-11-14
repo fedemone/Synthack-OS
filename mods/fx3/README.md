@@ -18,7 +18,7 @@ A **third send effect** next to delay and reverb: **chorus**, **flanger**, **pha
 - FLNG and PHSR feedback is bipolar: centre = none. PHSR is four allpass stages; WID turns the right side into the complementary response (notches where the left has peaks). CRSH is mono and hides the two knobs it doesn't use.
 - Each knob takes the icon of a similar OS parameter (machine SPD, MOD, sweep time/depth, TONE, BAL, OVER…), so every effect looks different.
 - The return goes to the direct bus (like delay and reverb with *FX Routing* off).
-- **Saved with the kit** (per pattern, like delay and reverb): in four words of the pattern kit the OS never uses (internal ids 0, 0x1A, 0x38 = hidden id 144, 0x46), one byte per knob. Older projects load with the default values.
+- **Saved with the kit** (per pattern, like delay and reverb): in four words of the pattern kit the OS never uses (internal ids 0, 0x1A, 0x38 = hidden id 144, 0x46), one byte per knob. Older projects load with the default values. The OS kit file format drops words 0x1A and 0x46 and reads word 0 back from 0x1A (FUNC+YES/NO, project save): hooks on the FX block writer/reader (`0x400A6D96` / `0x400A6D2E`) keep the three words in 8 bytes of the block the OS zeroes and never reads (marker `SH`). Files without the marker load the defaults.
 
 ## How it works
 
@@ -27,7 +27,7 @@ A **third send effect** next to delay and reverb: **chorus**, **flanger**, **pha
 - **Chorus / flanger**: one modulated delay line with two interpolated taps (L/R). A sudden TIME change glides (at most 8 samples per block), so the taps never jump.
 - **DEL send:** the chorus output of the previous block goes into the delay bus right before the delay (`0x4008F828`), 0.67 ms later.
 - **Cost** (instructions per 32-sample block, emulator, one track sending): CHOR ~1 300, FLNG ~1 500, PHSR ~1 700, CRSH ~850; ~60 idle; ~2 300 worst case (12 tracks, feedback, DEL). Nothing runs without sends, with VOL and DEL at 0, or once the inputs are silent (sequencer stopped) and the tail has died out. The OS already uses ~89 % of the CPU at rest, so this matters: see [docs/audio-path.md](../../docs/audio-path.md#cpu-load).
-- **UI:** page 25 (unused "OB8" page) becomes REVERB page 2; the DELAY/REVERB tab is told to draw it as 8 plain slots. Controls are hidden ids 246–253 (Digitakt MIDI-track parameters) via [vparams](../vparams); their names are RAM strings rewritten when TYPE changes, together with the icons and the page slots — from UI code only (see [modding guide](../../docs/modding-guide.md#5-text-icons-and-styles)). The AMP tab is patched to give SND3 its own graphic (delay-send icon).
+- **UI:** stock page 25 ("OB8 / Outbox 8") becomes REVERB page 2 only while the FX context is active; the DELAY/REVERB tab then draws eight plain slots. IDs 246-253 are genuine MIDI descriptors, so FX3 captures their existing descriptors, objects and slots only in that context and restores them on leaving it. Its [vparams](../vparams) entries use the same context guard. Names are RAM strings rewritten when TYPE changes, together with icons and page slots - from UI code only (see [modding guide](../../docs/modding-guide.md#5-text-icons-and-styles)). The AMP tab is patched to give SND3 its own graphic (delay-send icon).
 - Needs id 72 free: [master-comp](../master-comp) ATK moved to id 122.
 
 ## Build / test
@@ -36,4 +36,4 @@ A **third send effect** next to delay and reverb: **chorus**, **flanger**, **pha
 python mods/fx3/make_patch.py
 ```
 
-Test: `tests/test_fx3.py` (send gains like the OS, mute, bus sums, chorus as a pure delay, reads inside the line with sudden TIME changes, phaser and crusher against bit-exact models, return interpolation, sign and saturation, send to delay, idle after heavy use and with silent inputs, cost per block and per type, kit storage and pattern change, names and texts per type, page and drawing hooks).
+Test: `tests/test_fx3.py` (send gains like the OS, mute, bus sums, chorus as a pure delay, reads inside the line with sudden TIME changes, phaser and crusher against bit-exact models, return interpolation, sign and saturation, send to delay, idle after heavy use and with silent inputs, cost per block and per type, kit storage and pattern change, kit file round trip through the OS writer/reader, names and texts per type, page and drawing hooks).

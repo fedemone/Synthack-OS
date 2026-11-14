@@ -6,9 +6,9 @@
  * di L step allineato alla griglia e si tiene la posizione "reale", ripresa al rilascio.
  * Si ripetono gli step (note e p-lock), quindi anche le tracce analogiche.
  *
- * Interfaccia: i rate RPT1 e RPT2 (id nascosti 113 e 124, mods/vparams) stanno nelle prime due caselle
- * della pagina TRIG della FX track, scritti come testo ("1/16"). Con la FX track attiva si ripete tenendo
- * premuti i tasti di retrig 13 (RPT1) e 14 (RPT2):
+ * Interfaccia: RPT1/RPT2 reuse MIDI ids 269 and 124 only in the FX TRIG context.
+ * A scoped helper restores the MIDI properties outside that context; the controls show text ("1/16").
+ * With the FX track active, hold retrig keys 13 (RPT1) or 14 (RPT2):
  * - pressione: ramo dei tasti 13-16 di KeyboardView::consumeKeyEvent (0x4002EA92), dopo i controlli
  *   di modo dell'OS; sulle altre tracce e con i tasti 15-16 resta il retrig originale;
  * - rilascio: anche dal dispatcher degli eventi (0x4000B420), cosi' vale pure dopo un cambio di traccia.
@@ -249,7 +249,7 @@ __asm__(
     "        .globl  br_page_stub\n"
     "br_page_stub:\n"                           /* al posto di clr.l 0x41B9F928: caselle 1 e 2 */
     "        move.l  %d0,-(%sp)\n"
-    "        moveq   #113,%d0\n"
+    "        move.l  #269,%d0\n"
     "        move.l  %d0,0x41B9F924\n"
     "        moveq   #124,%d0\n"
     "        move.l  %d0,0x41B9F928\n"

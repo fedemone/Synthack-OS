@@ -26,7 +26,7 @@ Static C++ initializer `0x401885D2–0x401968F4` builds page objects in BSS (44 
 
 Slots are read at draw time: changing them at runtime changes the page (0 = empty slot). AMP slots: page 1 `0x41B9F60C` / `0x41B9F638` (AHD / ADSR variant), page 2 `0x41B9F664` / `0x41B9F690`.
 
-- Page elements: array of 37 at `0x41B9F3C8` (44 B each), index → element `0x4007B9D0`. Page 25 ("OB8 / Outbox 8") is a Digitakt leftover, always empty: fx3 uses it.
+- Page elements: array of 37 at `0x41B9F3C8` (44 B each), index → element `0x4007B9D0`. Page 25 ("OB8 / Outbox 8") is a stock page. FX3 may borrow its slots only in the FX context; it is not globally free.
 - **Tabs** are page widgets built from constant arrays of page indices + count (`0x4017DA3A`), e.g. DELAY `{20}` at `0x401C7FAC`, REVERB `{21}` at `0x401C7FA8` (built at `0x40035890`), generic class `0x40042B58`. A tab with N pages cycles them on its key; widget +124 = page vector, +144 = current position. The page's virtual +188 returns the id under an encoder.
 - Per-object fields before the prototypes: +0 type (0 = plain value, others change the encoder step: MIDI-track ids use 4/5, toggles 12), +4 value prototype (`d3` = discrete/standard, as in LFO MODE).
 
@@ -46,12 +46,15 @@ Slots are read at draw time: changing them at runtime changes the page (0 = empt
 
 | Id | Stock meaning | Mod use |
 |---|---|---|
-| 59, 91, 101, 115, 122, 127, 144 | gain, slews, delay routing, reverb mix alias, pan alias, amp delay time | master-comp (virtual, via [vparams](../mods/vparams)); the kit word of 144 stores fx3 |
+| 262-268 | Syntakt MIDI-track CC1-CC7 Select descriptors | master-comp only while the FX SYN context is active; restored for MIDI pages |
+| 144 | amp delay time | the kit word of 144 stores fx3 |
 | 72 | amp "Delay Time", saved per track, unused | fx3 SND3 (native, per track) |
-| 113, 124 | delay mix alias, reverb routing | beat-repeat RPT1/RPT2 (virtual) |
+| 269, 124 | Syntakt MIDI CC8 Select and a native descriptor | beat-repeat RPT1/RPT2 only in the FX TRIG context; native state restored on MIDI pages |
 | 246–253 | Digitakt MIDI-track parameters (no MIDI tracks on Syntakt) | fx3 page (virtual) |
 
 Ids 1–5 and 11–18 are tied to MIDI CCs (bank select, data entry, all notes off…): not reusable.
+
+**Hidden is not free.** Ids without a page or MIDI CC are often *aliases* the OS swaps onto a page: 59 GAIN replaces 60 RESO for track filter types 2–6 (`0x40042140` in 1.42), 122 REV shows on MIXER page 2, 91/101 SLEW replace SPH, 125 IN and 127 PAN replace IN LR and BAL, 113 is the delay mix (114). Same group + internal id as the visible parameter = alias: do not reuse. `tests/test_id_audit.py` checks every id the mods register.
 
 ## Per-parameter objects
 
@@ -86,3 +89,4 @@ Group handlers use jump tables by logical id (e.g. external mixer: get `0x4000C8
 - Pattern kit (`*0x800030BC`, 142 B): the FX track's parameters, **one word per internal id** (offset = 2 × id, ids 0…0x46), copied whole to the engine (`0x80002874`). Blocks: LFO +2…+33, delay +34…+53, reverb +54…+69, external +70…+87, filter +88…+111, amp +112…+139 (DRIVE +124). Words the OS does not use: ids 0, 0x1A, 0x24, 0x27, 0x29, 0x2A, 0x37, 0x46 (+ 0x38 = hidden id 144).
 - Global flags `0x43BDE444`: bit 0 internal mixer, 1 external, **2 SYN (DRIVE)**, 3 filter, 4 amp. Enabled blocks are copied (memcpy) between kit and the global container `0x41B9D3B0`; the engine sync `0x400A1D18` copies whole blocks.
 - **Unused words**, saved with the kit: external block UI +30, +36, +40, +42 (pattern kit +72, +78, +82, +84) → master compressor; pattern kit +0, +52, +112, +140 (ids 0, 0x1A, 0x38, 0x46) → fx3; +110 (id 0x37) → beat-repeat.
+- **Kit file format** (FUNC+YES/NO, project save): the FX block is written by `0x400A6D96` and read by `0x400A6D2E` through a position table (`0x40233E78` / `0x40233F90`) that **drops words 0x1A and 0x46 and reads word 0 back from 0x1A**; LFO destinations (words 4, 12) go through the same table. Bytes +148…+155 of the 156-byte file block are zeroed and never read: fx3 keeps its three words there. A new kit word must survive this round trip (`tests/test_fx3.py`).

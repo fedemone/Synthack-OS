@@ -40,7 +40,7 @@ typedef unsigned short u16;
 #define DATA __attribute__((section(".data")))
 #define H         16                                       /* campioni per blocco a 24 kHz */
 #define DL        1024                                     /* linea a 24 kHz: 42 ms (TIME + DEP <= 38 ms) */
-#define DL_M      ((s16 *)0x4600E000u)                     /* linea mono + copia a +DL (area mod azzerata) */
+#define DL_M      ((s16 *)(MODAREA_RAM + 0xE000u))         /* linea mono + copia a +DL (area mod azzerata) */
 #define MAXD      (8 << 8)                                 /* variazione massima del ritardo per blocco (Q8) */
 #define SRC_D     0x80003D50u                              /* tracce digitali, 32 campioni a passo 128 B */
 #define SRC_A     0x80003950u                              /* tracce analogiche (canali 0..3) */
@@ -49,6 +49,11 @@ typedef unsigned short u16;
 #define KIT       (*(char *const volatile *)0x800030BCu)   /* kit del pattern attivo */
 #define LOUD      (10 << 16)                               /* ingresso udibile: oltre 10/32768 (-70 dB) */
 #define UI_ROOT   (*(char *const volatile *)0x444E1334u)
+#define PROJECT   (*(const u32 *const volatile *)0x444E13F4u)
+#define ACTIVE_TRACK ((s32 (*)(u32))0x4001FF74u)
+#define FX_TRACK  12
+#define DESC      0x4022D59Cu
+#define NO_STYLE  0x41B9FA68u
 #define DRAW_TEXT ((void (*)(void *, const void *, s32, s32, s32, s32, const char *, const char *, ...))                    0x400F8C18u)                            /* (ctx, font, x, y, centrato, 0, sagoma, fmt, ...) */
 #define FONT      ((const void *)0x402A91C0u)              /* 4x6 */
 
@@ -95,6 +100,8 @@ static u32 decode(u32 w, u32 i)                          /* byte del parametro i
 
 /* nomi e testi della pagina secondo il tipo (stringhe in RAM: i descrittori puntano qui) */
 #include "fx3_names.h"
+char fx3_page_s[4] DATA = "FX3";
+char fx3_page_l[12] DATA = "Chorus";
 static const char *const n_s[NT][5] = {{"SPD", "DEP", "TIME", "FDBK", "WID"},
                                        {"SPD", "DEP", "TIME", "FDBK", "WID"},
                                        {"SPD", "DEP", "FREQ", "FDBK", "WID"},
@@ -108,6 +115,10 @@ static const char *const t_s[NT] = {"CHOR", "FLNG", "PHSR", "CRSH"};
 static const char *const t_l[NT] = {"Chorus", "Flanger", "Phaser", "Crusher"};
 static char *const name_s[5] = {fx3_n1_s, fx3_n2_s, fx3_n3_s, fx3_n4_s, fx3_n5_s};
 static char *const name_l[5] = {fx3_n1_l, fx3_n2_l, fx3_n3_l, fx3_n4_l, fx3_n5_l};
+static char *const desc_s[NP] = {fx3_n0_s, fx3_n1_s, fx3_n2_s, fx3_n3_s,
+                                  fx3_n4_s, fx3_n5_s, fx3_n6_s, fx3_n7_s};
+static char *const desc_l[NP] = {fx3_n0_l, fx3_n1_l, fx3_n2_l, fx3_n3_l,
+                                  fx3_n4_l, fx3_n5_l, fx3_n6_l, fx3_n7_l};
 static u32 named DATA = 0xFF;                             /* tipo di nomi, icone e caselle (0xFF: da fare) */
 
 /* icone: per ogni casella la coppia (+36 grafica, +68 stile) di un parametro dell'OS dal significato
@@ -141,6 +152,130 @@ static void graphic(u32 *dst, u32 proto)
     dst[0] = dst[1] = 0;
     dst[2] = proto ? (u32)fx3_mgr : 0;
     dst[3] = proto ? ((const u32 *)proto)[3] : 0;
+}
+
+/*
+ * IDs 246..253 are genuine MIDI-source descriptors on Syntakt. FX3 borrows
+ * them only while the FX track owns the Reverb view, then restores every field
+ * it changed. Keeping this transition here avoids a global descriptor alias.
+ */
+extern const void *const fx3_proto_type[4];
+extern const void *const fx3_proto_spd[4];
+extern const void *const fx3_proto_dep[4];
+extern const void *const fx3_proto_del[4];
+extern const void *const fx3_proto_fdbk[4];
+extern const void *const fx3_proto_wid[4];
+extern const void *const fx3_proto_vol[4];
+extern const void *const fx3_proto_type_gfx[4];
+static const void *const *const fx3_fmt_proto[NP] = {
+    fx3_proto_type, fx3_proto_spd, fx3_proto_dep, fx3_proto_del,
+    fx3_proto_fdbk, fx3_proto_wid, fx3_proto_vol, fx3_proto_vol
+};
+static void dress(void);
+static u32 fx3_saved_obj[NP][14] DATA = {{0}};
+static u32 fx3_saved_desc[NP][5] DATA = {{0}};
+static u32 fx3_saved_slots[9] DATA = {0};
+static u32 fx3_snapshot DATA = 0;
+static u32 fx3_ui_owned DATA = 0;
+
+static void fx3_capture_ui(void)
+{
+    u32 i, j;
+    if (fx3_snapshot)
+        return;
+    for (i = 0; i < NP; i++) {
+        u32 *d = (u32 *)(DESC + 52u * ids[i]);
+        u32 *o = OBJ(ids[i]), *saved = fx3_saved_obj[i];
+        u32 *saved_d = fx3_saved_desc[i];
+        saved_d[0] = d[2];
+        saved_d[1] = d[3];
+        saved_d[2] = d[4];
+        saved_d[3] = d[10];
+        saved_d[4] = d[12];
+        saved[0] = o[0];
+        saved[1] = o[1];
+        for (j = 0; j < 4; j++) {
+            saved[2 + j] = o[5 + j];
+            saved[6 + j] = o[9 + j];
+            saved[10 + j] = o[17 + j];
+        }
+    }
+    for (i = 0; i < 9; i++)
+        fx3_saved_slots[i] = SLOTS[i];
+    fx3_snapshot = 1;
+}
+
+static void fx3_restore_ui(void)
+{
+    u32 i, j;
+    if (!fx3_ui_owned)
+        return;
+    for (i = 0; i < NP; i++) {
+        u32 *d = (u32 *)(DESC + 52u * ids[i]);
+        u32 *o = OBJ(ids[i]), *saved = fx3_saved_obj[i];
+        u32 *saved_d = fx3_saved_desc[i];
+        d[2] = saved_d[0];
+        d[3] = saved_d[1];
+        d[4] = saved_d[2];
+        d[10] = saved_d[3];
+        d[12] = saved_d[4];
+        o[0] = saved[0];
+        o[1] = saved[1];
+        for (j = 0; j < 4; j++) {
+            o[5 + j] = saved[2 + j];
+            o[9 + j] = saved[6 + j];
+            o[17 + j] = saved[10 + j];
+        }
+    }
+    for (i = 0; i < 9; i++)
+        SLOTS[i] = fx3_saved_slots[i];
+    put(fx3_page_s, "OB8");
+    put(fx3_page_l, "Outbox 8");
+    named = 0xFF;
+    fx3_ui_owned = 0;
+}
+
+static void fx3_claim_ui(void)
+{
+    u32 i;
+    const u32 *donor;
+
+    if (fx3_ui_owned)
+        return;
+    fx3_capture_ui();
+    donor = OBJ(250);
+    for (i = 0; i < NP; i++) {
+        u32 *d = (u32 *)(DESC + 52u * ids[i]);
+        u32 *o = OBJ(ids[i]);
+        d[2] = 0;
+        d[3] = (u32)maxv[i] << 8;
+        d[4] = (u32)defv[i] << 8;
+        d[10] = (u32)desc_l[i];
+        d[12] = (u32)desc_s[i];
+        o[0] = donor[0];
+        o[1] = donor[1];
+        graphic(o + 5, (u32)fx3_fmt_proto[i]);
+    }
+    graphic(OBJ(246) + 9, (u32)fx3_proto_type_gfx);
+    graphic(OBJ(246) + 17, NO_STYLE);
+    for (i = 0; i < NP; i++)
+        SLOTS[i] = ids[i];
+    SLOTS[NP] = 0;
+    named = 0xFF;
+    fx3_ui_owned = 1;
+    dress();
+}
+
+s32 fx3_active_context(void)
+{
+    u32 project = (u32)PROJECT;
+
+    if (!project || ACTIVE_TRACK(project + 48) != FX_TRACK) {
+        fx3_restore_ui();
+        return 0;
+    }
+    fx3_claim_ui();
+    return 1;
 }
 
 /* nomi, icone e caselle secondo il tipo. Solo nel contesto dell'interfaccia (formattatori, grafica,
@@ -626,7 +761,6 @@ PROTO(fx3_proto_vol, fx3_fmt_vol);
 PROTO(fx3_proto_type_gfx, fx3_type_gfx);
 
 const u32 fx3_reverb_pages[2] = {21, 25};                  /* tab REVERB: pagina dell'OS + la nostra */
-const char fx3_page_s[] = "FX3";
 const char fx3_snd_s[] = "FX3";
 const char fx3_snd_l[] = "FX3 Send";
 
@@ -1114,35 +1248,61 @@ __asm__(
     "        moveq   #25,%d1\n"
     "        cmp.l   %d1,%d0\n"
     "        bne.s   1f\n"
+    "        jsr     fx3_active_context\n"
+    "        tst.l   %d0\n"
+    "        beq.s   1f\n"
     "        jmp     0x4003A244\n"
     "1:      lea     -96(%sp),%sp\n"            /* istruzioni sostituite */
     "        movem.l %d2-%d7/%a2-%a6,(%sp)\n"
     "        jmp     0x40042CE8\n"
-    "        .globl  fx3_page_stub\n"
-    "fx3_page_stub:\n"                          /* al posto di clr.l 0x41B9F83C: caselle della pagina 25 */
-    "        move.l  %a0,-(%sp)\n"
-    "        move.l  %d0,-(%sp)\n"
-    "        lea     0x41B9F81C,%a0\n"
-    "        move.l  #246,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        move.l  #247,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        move.l  #248,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        move.l  #250,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        move.l  #251,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        move.l  #252,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        move.l  #249,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        move.l  #253,%d0\n"
-    "        move.l  %d0,(%a0)+\n"
-    "        clr.l   (%a0)\n"                   /* +40 (istruzione sostituita) */
-    "        move.l  (%sp)+,%d0\n"
-    "        move.l  (%sp)+,%a0\n"
+    /* Kit nel file (salvataggio, FUNC+YES/NO, progetto): il blocco della FX track passa da 0x400A6D96
+     * (scrittura) e 0x400A6D2E (lettura) con una tabella di posizioni che perde le parole degli id
+     * interni 0x1A e 0x46 e rilegge nella 0 il valore della 0x1A. Le tre parole di fx3 vanno nei byte
+     * +148..+155 del blocco nel file, che l'OS azzera e non legge: marcatore "SH" e le tre parole. */
+    "        .globl  fx3_kser_hook\n"
+    "fx3_kser_hook:\n"                         /* al posto di 0x400A6D96 (file, kit) */
+    "        move.l  8(%sp),-(%sp)\n"
+    "        move.l  8(%sp),-(%sp)\n"
+    "        bsr.s   1f\n"
+    "        addq.l  #8,%sp\n"
+    "        tst.b   %d0\n"
+    "        beq.s   2f\n"
+    "        movea.l 4(%sp),%a0\n"              /* blocco nel file */
+    "        movea.l 8(%sp),%a1\n"              /* blocco nel kit: una parola per id interno */
+    "        move.w  #0x5348,%d1\n"
+    "        move.w  %d1,148(%a0)\n"
+    "        move.w  (%a1),150(%a0)\n"
+    "        move.w  52(%a1),152(%a0)\n"
+    "        move.w  140(%a1),154(%a0)\n"
+    "2:      rts\n"
+    "1:      move.l  %a3,-(%sp)\n"             /* istruzioni sostituite */
+    "        move.l  %a2,-(%sp)\n"
+    "        movea.l 12(%sp),%a2\n"
+    "        jmp     0x400A6D9E\n"
+    "        .globl  fx3_kdes_hook\n"
+    "fx3_kdes_hook:\n"                         /* al posto di 0x400A6D2E (kit, file) */
+    "        move.l  8(%sp),-(%sp)\n"
+    "        move.l  8(%sp),-(%sp)\n"
+    "        bsr.s   1f\n"
+    "        addq.l  #8,%sp\n"
+    "        tst.b   %d0\n"
+    "        beq.s   3f\n"
+    "        movea.l 4(%sp),%a0\n"              /* blocco nel kit */
+    "        movea.l 8(%sp),%a1\n"              /* blocco nel file */
+    "        move.w  148(%a1),%d1\n"
+    "        cmpi.w  #0x5348,%d1\n"
+    "        bne.s   2f\n"
+    "        move.w  150(%a1),(%a0)\n"
+    "        move.w  152(%a1),52(%a0)\n"
+    "        move.w  154(%a1),140(%a0)\n"
     "        rts\n"
+    "2:      clr.w   (%a0)\n"                  /* file senza marcatore: valori di default */
+    "        clr.w   52(%a0)\n"
+    "        clr.w   140(%a0)\n"
+    "3:      rts\n"
+    "1:      lea     -12(%sp),%sp\n"           /* istruzioni sostituite */
+    "        movem.l %a2-%a4,(%sp)\n"
+    "        jmp     0x400A6D36\n"
     "        .globl  fx3_amp_stub\n"
     "fx3_amp_stub:\n"                           /* al posto di clr.l 0x41B9F6A0 (fine delle pagine AMP): */
     "        move.l  %d0,-(%sp)\n"              /* SND3 (72) in G della pagina 1, accanto a DEL e REV, */
