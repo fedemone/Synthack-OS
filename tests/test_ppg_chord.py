@@ -127,3 +127,64 @@ def test_emulated_sy_chord_follows_new_table():
     assert not np.allclose(stock, new)                      # e suona diverso
     # il nuovo livello resta vicino a quello stock (stesso RMS della tabella, mai piu' picco)
     assert np.sqrt(np.mean(new ** 2)) < 2.0 * np.sqrt(np.mean(stock ** 2))
+
+
+# ------------------------------------------------------------ wavetable e catalogo (ROM sintetica)
+
+def synthetic_rom(tmp_path, n_waves=8):
+    """Stesso formato C di wave-stuff/data/ppg_data.c, dati nostri (onde sinusoidali con armoniche)."""
+    ph = (np.arange(64) + 0.5) / 128
+    rom = [np.clip(np.round(128 + 120 * np.sin(2 * np.pi * (k + 1) * ph) / (1 + 0.1 * k)), 0, 255).astype(int)
+           for k in range(n_waves)]
+    rom[5] = np.full(64, 128)                                     # onda vuota
+    rom[6] = rom[1]                                               # duplicato
+    # tabella 0: chiavi 0->1, 30->2, 60->3 ; tabella 1: 0->4, 60->7
+    tables = [0x00, 1, 0, 2, 30, 3, 60, 0x01, 4, 0, 7, 60]
+    fmt = lambda v: ",\n".join(f"\t0x{x:02x}, // c" for x in v)  # noqa: E731
+    f = tmp_path / "ppg_data.c"
+    f.write_text('#include <inttypes.h>\n#include "ppg_data.h"\n\n\n'
+                 f"const uint8_t ppg_wavetable[] = {{\n{fmt(tables)}\n}};\n\n"
+                 f"const uint8_t ppg_waveforms[] = {{\n{fmt(np.concatenate(rom))}\n}};\n")
+    return f, np.array(rom)
+
+
+def test_wavetable_parser_and_slots(tmp_path):
+    f, rom = synthetic_rom(tmp_path)
+    assert waves.parse_ppg_wavetables(f) == [[(0, 1), (30, 2), (60, 3)], [(0, 4), (60, 7)]]
+    w, how = waves.from_ppg_table(f, 0, 30)                     # chiave esatta
+    assert np.array_equal(w.cycle, waves.ppg_expand(rom[2])) and how == "onda 2"
+    w, how = waves.from_ppg_table(f, 0, 15)                     # a meta' fra 1 e 2
+    assert np.allclose(w.cycle, 0.5 * waves.ppg_expand(rom[1]) + 0.5 * waves.ppg_expand(rom[2]))
+    w, _ = waves.from_ppg_table(f, 1, 45)
+    assert np.allclose(w.cycle, 0.25 * waves.ppg_expand(rom[4]) + 0.75 * waves.ppg_expand(rom[7]))
+    with pytest.raises(ValueError):
+        waves.from_ppg_table(f, 2, 0)
+    with pytest.raises(ValueError):
+        waves.from_ppg_table(f, 0, 61)
+
+
+def test_cli_ppg_table_patch(tmp_path, monkeypatch):
+    f, _ = synthetic_rom(tmp_path)
+    monkeypatch.setattr(mp, "load_section7", lambda _: fake_section7(stock_like()))
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    stock = tmp_path / "stock.syx"
+    stock.write_bytes(b"x")
+    assert mp.main(["build", "--stock", str(stock), "--ppg-rom", str(f), "--ppg-table", "0", "--ppg-slot", "15"]) == 0
+    import json
+    spec = json.loads((tmp_path / "patch.json").read_text())
+    assert spec["wave"]["name"] == "wt00s15" and "0.50*onda 1 + 0.50*onda 2" in spec["wave"]["source"]
+
+
+def test_catalog_page(tmp_path):
+    import json
+    import catalog
+    f, rom = synthetic_rom(tmp_path)
+    out = tmp_path / "catalog.html"
+    n = catalog.build(f, out)
+    assert n == {"designed": len(waves.SPECTRA), "rom": len(rom), "tables": 2}
+    page = out.read_text()
+    data = json.loads(page.split("const D=", 1)[1].split(";\n", 1)[0])
+    assert data["rom"][5]["empty"] == 1 and data["rom"][6]["dup"] == 1
+    assert data["tables"] == [[[0, 1], [30, 2], [60, 3]], [[0, 4], [60, 7]]]
+    assert len(data["romCycles"]) == 4 * ((len(rom) * 128 + 2) // 3)
+    assert catalog.build(None, tmp_path / "d.html")["rom"] == 0

@@ -128,17 +128,58 @@ def design(name: str, bits: int = 8) -> Wave:
     return Wave(name, np.round(x * q) / q * 128)
 
 
+def _c_array(text: str, name: str) -> list[int]:
+    m = re.search(name + r"\s*\[[^\]]*\]\s*=\s*\{(.*?)\}", text, re.S)
+    if not m:
+        raise ValueError(f"array '{name}' non trovato")
+    body = re.sub(r"/\*.*?\*/|//[^\n]*", "", m.group(1), flags=re.S)
+    return [int(v, 0) for v in re.findall(r"0[xX][0-9a-fA-F]+|\d+", body)]
+
+
 def parse_ppg_rom(path: Path) -> np.ndarray:
     """Legge `ppg_waveforms[] = {...}` da una copia locale di wave-stuff/data/ppg_data.c -> (N, 64)."""
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
-    m = re.search(r"ppg_waveforms\s*\[[^\]]*\]\s*=\s*\{(.*?)\}", text, re.S)
-    if not m:
-        raise ValueError(f"{path}: array 'ppg_waveforms' non trovato")
-    body = re.sub(r"/\*.*?\*/|//[^\n]*", "", m.group(1), flags=re.S)
-    vals = [int(v, 0) for v in re.findall(r"0[xX][0-9a-fA-F]+|\d+", body)]
+    vals = _c_array(Path(path).read_text(encoding="utf-8", errors="replace"), "ppg_waveforms")
     if len(vals) < HALF or len(vals) % HALF or max(vals) > 255:
         raise ValueError(f"{path}: {len(vals)} valori, attesi multipli di 64 byte")
     return np.array(vals, dtype=np.int64).reshape(-1, HALF)
+
+
+SLOTS = 61                                 # posizioni usate di una wavetable (0..60), come in wave-stuff
+
+
+def parse_ppg_wavetables(path: Path) -> list[list[tuple[int, int]]]:
+    """`ppg_wavetable[]`: per ogni tabella un byte (ignorato), poi coppie (onda, posizione) fino
+    alla posizione 60. Le posizioni fra due onde chiave si interpolano (ppg_wt_dump.c di wave-stuff).
+    Ritorna, per tabella, la lista delle chiavi [(posizione, onda), ...]."""
+    data = _c_array(Path(path).read_text(encoding="utf-8", errors="replace"), "ppg_wavetable")
+    tables, i = [], 0
+    while i + 2 < len(data):
+        i += 1
+        keys = []
+        while i + 1 < len(data):
+            wave, pos = data[i], data[i + 1]
+            i += 2
+            keys.append((min(pos, SLOTS - 1), wave))
+            if pos >= SLOTS - 1:
+                break
+        else:
+            break                          # tabella troncata: fine dei dati
+        tables.append(sorted(dict(keys).items()))
+    return tables
+
+
+def table_slot_cycle(rom: np.ndarray, keys: list[tuple[int, int]], slot: int) -> tuple[np.ndarray, str]:
+    """Ciclo (128 campioni centrati) alla posizione 'slot' di una wavetable: interpolazione lineare
+    fra le due onde chiave vicine, come fa il PPG scorrendo la tabella."""
+    if not 0 <= slot < SLOTS:
+        raise ValueError(f"posizione {slot} fuori da 0..{SLOTS - 1}")
+    left = max((k for k in keys if k[0] <= slot), default=keys[0])
+    right = min((k for k in keys if k[0] >= slot), default=keys[-1])
+    a = ppg_expand(rom[left[1]])
+    if right[0] == left[0]:
+        return a, f"onda {left[1]}"
+    t = (slot - left[0]) / (right[0] - left[0])
+    return (1 - t) * a + t * ppg_expand(rom[right[1]]), f"{1 - t:.2f}*onda {left[1]} + {t:.2f}*onda {right[1]}"
 
 
 def from_ppg_rom(path: Path, index: int) -> Wave:
@@ -146,6 +187,14 @@ def from_ppg_rom(path: Path, index: int) -> Wave:
     if not 0 <= index < len(rom):
         raise ValueError(f"onda {index} fuori dalla ROM (0..{len(rom) - 1})")
     return Wave(f"ppg{index:03d}", ppg_expand(rom[index]))
+
+
+def from_ppg_table(path: Path, table: int, slot: int) -> tuple[Wave, str]:
+    rom, tables = parse_ppg_rom(path), parse_ppg_wavetables(path)
+    if not 0 <= table < len(tables):
+        raise ValueError(f"wavetable {table} fuori da 0..{len(tables) - 1}")
+    cycle, how = table_slot_cycle(rom, tables[table], slot)
+    return Wave(f"wt{table:02d}s{slot:02d}", cycle), how
 
 
 def to_table(cycle: np.ndarray, interp: str = "fft") -> np.ndarray:

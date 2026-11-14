@@ -7,7 +7,9 @@ La patch riscrive solo quei 2048 byte: nessun codice cambia.
     python mods/ppg-chord/make_patch.py preview                    # WAV di accordi, senza firmware
     python mods/ppg-chord/make_patch.py build --wave hollow        # patch.json (serve l'OS stock)
     python mods/ppg-chord/make_patch.py build --wave vox --emu     # + SY CHORD nell'emulatore, prima/dopo
+    python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c   # TUTTE le onde, pagina HTML locale
     python mods/ppg-chord/make_patch.py build --ppg-rom local/ppg_data.c --ppg-index 23
+    python mods/ppg-chord/make_patch.py build --ppg-rom local/ppg_data.c --ppg-table 5 --ppg-slot 30
 
 Le onde sono descritte in waves.py. --ppg-rom legge una copia LOCALE dei dati di wave-stuff
 (data/ppg_data.c): mettila in local/ (git-ignored), non nel repo.
@@ -179,8 +181,13 @@ def emu_render(table: bytes | None, note: int, seconds: float) -> list[int]:
 
 def pick_wave(a: argparse.Namespace) -> tuple[waves.Wave, str]:
     if a.ppg_rom:
+        if a.ppg_table is not None:
+            if a.ppg_slot is None:
+                raise SystemExit("--ppg-table richiede --ppg-slot 0..60")
+            w, how = waves.from_ppg_table(a.ppg_rom, a.ppg_table, a.ppg_slot)
+            return w, f"ROM PPG locale, wavetable {a.ppg_table} posizione {a.ppg_slot} = {how}"
         if a.ppg_index is None:
-            raise SystemExit("--ppg-rom richiede --ppg-index N")
+            raise SystemExit("--ppg-rom richiede --ppg-index N oppure --ppg-table T --ppg-slot S")
         return waves.from_ppg_rom(a.ppg_rom, a.ppg_index), f"ROM PPG locale, onda {a.ppg_index}"
     return waves.design(a.wave, a.bits), ""
 
@@ -188,7 +195,10 @@ def pick_wave(a: argparse.Namespace) -> tuple[waves.Wave, str]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list", help="onde disponibili")
+    sub.add_parser("list", help="onde progettate (per la ROM PPG: catalog)")
+    c = sub.add_parser("catalog", help="pagina HTML locale con TUTTE le onde, da ascoltare e scegliere")
+    c.add_argument("--ppg-rom", type=Path, help="copia locale di wave-stuff/data/ppg_data.c")
+    c.add_argument("-o", "--out", type=Path, default=OUT / "catalog.html")
 
     def wave_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("--interp", choices=("fft", "step"), default="fft",
@@ -197,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--gain-db", type=float, default=0.0, help="correzione di livello (mai oltre il picco stock)")
         p.add_argument("--ppg-rom", type=Path, help="copia locale di wave-stuff/data/ppg_data.c")
         p.add_argument("--ppg-index", type=int, help="onda della ROM PPG, 0..255")
+        p.add_argument("--ppg-table", type=int, help="wavetable della ROM PPG (con --ppg-slot)")
+        p.add_argument("--ppg-slot", type=int, help="posizione nella wavetable, 0..60 (interpolata fra le chiavi)")
         p.add_argument("--stock", type=Path, default=REPO / "firmware" / "Syntakt_OS1.41.syx")
 
     p = sub.add_parser("preview", help="accordi in WAV per ogni onda (non serve il firmware)")
@@ -216,6 +228,13 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "list":
         for name, (desc, _) in waves.SPECTRA.items():
             print(f"  {name:8s} {desc}")
+        return 0
+
+    if a.cmd == "catalog":
+        import catalog
+        n = catalog.build(a.ppg_rom, a.out)
+        print(f"{a.out}: {n['designed']} onde progettate, {n['rom']} onde ROM, {n['tables']} wavetable"
+              f"{'' if a.ppg_rom else ' (senza --ppg-rom: solo le progettate)'}")
         return 0
 
     stock_table = None
