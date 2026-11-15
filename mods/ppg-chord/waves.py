@@ -277,3 +277,130 @@ def harmonics(table: np.ndarray, n: int = 12) -> list[tuple[int, float]]:
     order = np.argsort(mag)[::-1][:n]
     ref = mag[order[0]] or 1.0
     return [(int(k) + 1, float(20 * np.log10(mag[k] / ref + 1e-12))) for k in sorted(order)]
+
+
+# --- banco "curato": 31 onde scelte, non una wavetable --------------------------------------
+# Le onde della ROM sono molte di piu' dei 31 frame. Si scartano vuote, doppioni e forme di base
+# (seno, dente di sega, quadra, triangolo, impulsi); fra le rimanenti si scelgono le 31 piu'
+# diverse fra loro e si ordinano da scure a brillanti: girare WAVE diventa una scala di colori.
+
+BAND = 40                                      # armoniche usate per confrontare gli spettri
+_HB = np.arange(1, BAND + 1)
+BASIC = {"sine": (_HB == 1) * 1.0, "saw": 1 / _HB, "square": (_HB % 2 == 1) / _HB,
+         "triangle": (_HB % 2 == 1) / _HB ** 2,
+         **{f"pulse {round(100 * d)}%": np.abs(np.sin(np.pi * _HB * d)) / _HB
+            for d in (0.0625, 0.125, 0.25, 0.375)}}
+BASIC = {k: v / np.linalg.norm(v) for k, v in BASIC.items()}
+
+
+def spectrum(cycle: np.ndarray) -> np.ndarray:
+    """Modulo delle armoniche 1..40, norma 1 (qualunque lunghezza di ciclo)."""
+    m = np.abs(np.fft.rfft(np.asarray(cycle, dtype=np.float64)))[1:BAND + 1]
+    return m / (np.linalg.norm(m) + 1e-12)
+
+
+def basic_shape(cycle: np.ndarray, threshold: float = 0.95) -> str | None:
+    """Nome della forma di base a cui lo spettro somiglia (coseno >= threshold), o None."""
+    s = spectrum(cycle)
+    name, sim = max(((k, float(s @ v)) for k, v in BASIC.items()), key=lambda kv: kv[1])
+    return name if sim >= threshold else None
+
+
+def brightness(cycle: np.ndarray) -> float:
+    """Baricentro spettrale in armoniche."""
+    m = np.abs(np.fft.rfft(np.asarray(cycle, dtype=np.float64)))[1:]
+    return float((np.arange(1, m.size + 1) * m).sum() / (m.sum() or 1))
+
+
+def candidates(rom: np.ndarray, threshold: float = 0.95) -> list[int]:
+    """Indici delle onde ROM non vuote, non doppie, non forme di base."""
+    seen, out = set(), []
+    for i, h in enumerate(rom):
+        key = h.tobytes()
+        if np.ptp(h) < 4 or key in seen:
+            continue
+        seen.add(key)
+        if basic_shape(ppg_expand(h), threshold) is None:
+            out.append(i)
+    return out
+
+
+def most_diverse(cycles: list[np.ndarray], n: int) -> list[int]:
+    """n indici scelti per massima diversita' (farthest-point sui radicali degli spettri),
+    partendo dall'onda piu' lontana da tutte le forme di base. Deterministico."""
+    feats = np.array([np.sqrt(spectrum(c)) for c in cycles])
+    feats /= np.linalg.norm(feats, axis=1, keepdims=True)
+    basics = np.array([np.sqrt(v) / np.linalg.norm(np.sqrt(v)) for v in BASIC.values()])
+    first = int(np.argmin((feats @ basics.T).max(axis=1)))
+    picked = [first]
+    dist = 1 - feats @ feats[first]
+    while len(picked) < min(n, len(cycles)):
+        k = int(np.argmax(dist))
+        picked.append(k)
+        dist = np.minimum(dist, 1 - feats @ feats[k])
+    return picked
+
+
+def curate(rom: np.ndarray, n: int = FRAMES, threshold: float = 0.95) -> list[int]:
+    """Le n onde ROM piu' diverse fra quelle non di base, ordinate da scure a brillanti."""
+    cand = candidates(rom, threshold)
+    cyc = [ppg_expand(rom[i]) for i in cand]
+    picked = [cand[k] for k in most_diverse(cyc, n)]
+    return sorted(picked, key=lambda i: brightness(ppg_expand(rom[i])))
+
+
+def condition_frame(frame: np.ndarray, harmonics: int = 40) -> np.ndarray:
+    """Un frame gia' nel formato del banco (256 campioni, parte da zero) con lo stesso limite di
+    banda e picco 1: per mescolare frame di MAX con onde PPG."""
+    spec = np.fft.rfft(np.asarray(frame, dtype=np.float64)[:FRAME_SAMPLES])
+    spec[0] = 0
+    spec[harmonics + 1:] = 0
+    y = np.fft.irfft(spec, n=FRAME_SAMPLES)
+    return y / np.max(np.abs(y))
+
+
+def mixed_bank(frames: list[np.ndarray]) -> np.ndarray:
+    """(31, 256) da frame gia' condizionati, di origine diversa. Polarita' scelta frame per frame
+    per somigliare al precedente: l'interpolazione di SY CHORD fra onde diverse non si svuota."""
+    if len(frames) != FRAMES:
+        raise ValueError(f"servono {FRAMES} frame, non {len(frames)}")
+    out = [np.asarray(frames[0], dtype=np.float64)]
+    for f in frames[1:]:
+        f = np.asarray(f, dtype=np.float64)
+        out.append(f if f @ out[-1] >= 0 else -f)
+    bank_ = np.array(out)
+    bank_[:, 0] = 0.0
+    return bank_
+
+
+def _similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Somiglianza di forma, senza segno (la polarita' la sceglie mixed_bank)."""
+    return abs(float(a @ b)) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12)
+
+
+def order_smooth(frames: list[np.ndarray]) -> list[int]:
+    """Ordine dei frame che rende ogni frame simile al successivo, partendo dal piu' scuro:
+    catena del vicino piu' simile, poi 2-opt. Le miscele di SY CHORD fra frame vicini restano
+    musicali (sui dati PPG: correlazione mediana fra vicini da ~0.25 a ~0.6)."""
+    n = len(frames)
+    sim = np.array([[_similarity(frames[i], frames[j]) for j in range(n)] for i in range(n)])
+    left = set(range(n))
+    order = [min(left, key=lambda i: brightness(frames[i]))]
+    left.remove(order[0])
+    while left:
+        nxt = max(sorted(left), key=lambda j: sim[order[-1], j])
+        order.append(nxt)
+        left.remove(nxt)
+    improved = True
+    while improved:
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
+                a, b, c = order[i - 1], order[i], order[j]
+                d = order[j + 1] if j + 1 < n else None
+                old = sim[a, b] + (sim[c, d] if d is not None else 0)
+                new = sim[a, c] + (sim[b, d] if d is not None else 0)
+                if new > old + 1e-9:
+                    order[i:j + 1] = order[i:j + 1][::-1]
+                    improved = True
+    return order

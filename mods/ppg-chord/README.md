@@ -24,6 +24,11 @@ The bank layout comes from [syntakt-firmware-workbench](https://github.com/Bezro
 ## Sources
 
 - **A PPG wavetable** (0–28) from your **local** copy of wave-stuff's `data/ppg_data.c`. Keep it in `local/` (git-ignored). A `patch.json` built from it contains data derived from that ROM.
+- **A curated bank** (`--curated`): 31 single ROM waves instead of one table. The ROM holds 241 distinct waves for 31 frames, so a choice is made:
+  - empty waves, duplicates and **basic shapes** are dropped. A wave counts as basic when its spectrum is ≥ 0.95 similar to a sine, saw, square, triangle or 6–38 % pulse; that's 55 of the 241, leaving 186.
+  - the 31 most different from each other are kept;
+  - they are ordered so that each wave resembles the next. The order starts from the darkest and roughly brightens; neighbour similarity rises from ~0.25 to ~0.6, so SY CHORD's blends between frames stay musical. `--order brightness` gives a strict dark → bright order instead.
+- **Your own list** (`--ppg-waves 12,40,77,…`, up to 31). In the catalog, star ROM waves and press *Starred ROM waves → bank* to get the command. With fewer than 31, `--fill-max` completes the bank from MAX's SY CHORD bank: first its 21 non-basic waves (FM, formant, wavefold, sync, organ, chord waves…), then, only if still needed, its saws and pulses.
 - **Our 7 designed waves** (`--designed`): hollow, brass, vox, glass, reso, sync, organ. They are spread over the table in order and interpolated. You can give your own order, for example `--designed vox glass reso`. These need no ROM, and the committed `patch.json` is this table.
 
 ![designed waves](waves.png)
@@ -36,13 +41,16 @@ python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --all   #
 python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --ppg-table 5 --hold 64
 python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-table 5    # writes patch.json
 python mods/ppg-chord/make_patch.py build   --designed
+python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --curated
+python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-waves 12,40,77 --fill-max
 ```
 
 `build` needs no firmware: the stock hash of the region is the one MAX's bank declares, and every build checks it again against your OS. With `firmware/Syntakt_OS1.41.syx` present, `build` also checks the stock bank right away. Add `--emu` to also render SY CHORD with the original engine, before and after.
 
 **The catalog** is one local page with every wave:
 - **Designed:** the 7 designed waves.
-- **ROM waves:** the 256 ROM waves, browse only.
+- **ROM waves:** the 256 ROM waves. Waves close to a basic shape are dimmed and labelled, and *hide basic shapes* removes them. Stars feed *Starred ROM waves → bank*.
+- **Curated bank:** the 31 waves `--curated` picks, in bank order, with **▶ sweep**.
 - **Wavetables:** the 29 tables. Each has a **▶ sweep** button that plays WAVE 4 → 124, and the slots that become frames are labelled W4 … W124.
 
 The footer shows the `build` command for the table you picked. ★ shortlists a wave in your browser. The page contains ROM data from your local file and is written to `out/`.

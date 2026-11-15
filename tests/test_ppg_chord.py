@@ -283,3 +283,85 @@ def test_emulated_wave_value_reads_the_frame_we_wrote():
         return np.max(np.abs(out - base)) / np.max(np.abs(base))
     assert diff(16) > 0.5
     assert diff(1) == 0 and diff(31) == 0
+
+
+# ------------------------------------------------------------ banco curato (onde scelte)
+
+def _cycle(spec_fn, n=128):
+    t = np.arange(n) / n
+    return sum(a * np.sin(2 * np.pi * h * t) for h, a in spec_fn().items())
+
+
+def test_basic_shape_detection():
+    saw = _cycle(lambda: {h: 1 / h for h in range(1, 41)})
+    sq = _cycle(lambda: {h: 1 / h for h in range(1, 41, 2)})
+    sine = _cycle(lambda: {1: 1.0})
+    odd = _cycle(lambda: {1: 1.0, 7: 0.9, 13: 0.8, 22: 0.5})
+    assert waves.basic_shape(saw) == "saw" and waves.basic_shape(sq) == "square"
+    assert waves.basic_shape(sine) == "sine" and waves.basic_shape(odd) is None
+    # le nostre onde non sono forme di base, tranne "brass" (un dente di sega con un picco lieve)
+    assert {n: waves.basic_shape(waves.design(n).cycle) for n in waves.SPECTRA} == \
+        {"hollow": None, "brass": "saw", "vox": None, "glass": None, "reso": None, "sync": None, "organ": None}
+
+
+def test_curate_skips_empty_duplicates_and_basic(tmp_path):
+    f, rom = synthetic_rom(tmp_path)                 # 0..7: seni puri (1a..8a armonica), 5 vuota, 6 = 1
+    rom = waves.parse_ppg_rom(f)
+    # i seni sono "forme di base" solo se la fondamentale domina: l'onda 0 (fondamentale) lo e'
+    cand = waves.candidates(rom)
+    assert 0 not in cand and 5 not in cand and 6 not in cand
+    picked = waves.curate(rom, 3)
+    assert len(picked) == 3 and set(picked) <= set(cand)
+    b = [waves.brightness(waves.ppg_expand(rom[i])) for i in picked]
+    assert b == sorted(b)
+
+
+def test_most_diverse_is_deterministic_and_spread():
+    cyc = [waves.design(n).cycle for n in waves.SPECTRA]
+    a, b = waves.most_diverse(cyc, 4), waves.most_diverse(cyc, 4)
+    assert a == b and len(set(a)) == 4
+
+
+def test_order_smooth_beats_random_order():
+    frames = [waves.condition(waves.design(n).cycle) for n in waves.SPECTRA] * 1
+    order = waves.order_smooth(frames)
+    assert sorted(order) == list(range(len(frames)))
+    sim = lambda o: sum(waves._similarity(frames[o[i]], frames[o[i + 1]]) for i in range(len(o) - 1))  # noqa: E731
+    assert sim(order) >= sim(list(range(len(frames))))
+    assert order[0] == min(range(len(frames)), key=lambda i: waves.brightness(frames[i]))
+
+
+def test_mixed_bank_aligns_polarity():
+    f = waves.condition(waves.design("brass").cycle)
+    bank = waves.mixed_bank([f if k % 2 == 0 else -f for k in range(31)])
+    assert all(bank[k] @ bank[k + 1] > 0 for k in range(30)) and (bank[:, 0] == 0).all()
+
+
+@pytest.mark.skipif(not MAX_MANIFEST.exists(), reason="manifest di MAX assente")
+def test_max_frames_split_basic_and_not():
+    nonbasic, basic = mp.max_frames(), mp.max_frames(basic=True)
+    assert len(nonbasic) + len(basic) == 31
+    names = {n for n, _ in nonbasic}
+    assert "MAX FM glass" in names and "MAX Saw" not in names
+    assert "MAX Saw" in {n for n, _ in basic}
+
+
+@pytest.mark.skipif(not MAX_MANIFEST.exists(), reason="manifest di MAX assente")
+def test_cli_custom_list_with_max_fill(tmp_path, monkeypatch):
+    f, _ = synthetic_rom(tmp_path)
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    none = str(tmp_path / "none.syx")
+    with pytest.raises(SystemExit, match="fill-max"):
+        mp.main(["build", "--stock", none, "--ppg-rom", str(f), "--ppg-waves", "1,2,3"])
+    with pytest.raises(SystemExit):
+        mp.main(["build", "--stock", none, "--ppg-rom", str(f), "--ppg-waves", "1,1"])
+    assert mp.main(["build", "--stock", none, "--ppg-rom", str(f), "--ppg-waves", "1,2,3", "--fill-max"]) == 0
+    spec = json.loads((tmp_path / "patch.json").read_text())
+    labels = list(spec["wave"]["frames"].values())
+    assert len(labels) == 31 and sum(lbl.startswith("PPG #") for lbl in labels) == 3
+    assert sum(lbl.startswith("MAX ") for lbl in labels) == 28
+    # prima tutte le 21 di MAX non di base, poi 7 di base
+    nonbasic = {n for n, _ in mp.max_frames()}
+    assert nonbasic <= set(labels)
+    q = mp.read_bank(bytes.fromhex(spec["patches"][0]["hex"]))
+    assert (q[:, 0] == 0).all() and (q[:, 256] == 0).all() and np.abs(q).max() == waves.PEAK
