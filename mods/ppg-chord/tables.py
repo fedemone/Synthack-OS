@@ -290,38 +290,111 @@ def formant_prominence(frame: np.ndarray, top: int = 40) -> float:
     return float(np.max(20 * np.log10(mag[h][ok] / env[h][ok]))) if ok.any() else 0.0
 
 
-# banco misto: (famiglia, frame, p iniziale, p finale, quanto spianare le gobbe)
-# Solo la zona vowel deve suonare come una vocale: reso, sync e metal hanno le gobbe ridotte
-# (con WAVE le gobbe si muovevano e su hardware si sentivano vocali "a ciclo" su tutto il banco).
-EBM_ZONES = [("reso", 7, 0.05, 0.85, 0.6), ("pwm", 6, 0.0, 0.9, 0.0), ("vowel", 7, 0.0, 1.0, 0.0),
-             ("sync", 6, 0.1, 0.8, 0.6), ("metal", 5, 0.15, 0.8, 0.5)]
-assert sum(z[1] for z in EBM_ZONES) == waves.FRAMES
+# --- banchi a zone ------------------------------------------------------------------------------
+# Un banco a zone mette piu' tabelle piccole nei 31 frame: WAVE sceglie la zona, un LFO con poca
+# profondita' la scorre. Una zona e' "nome:frame" o "nome:frame:spianatura"; il nome e' una famiglia
+# di FAMILIES o "ppgN" (wavetable N della ROM PPG, serve la copia locale dei dati).
+
+# Per ogni famiglia: (p iniziale, p finale, quanto spianare le gobbe). Solo la zona vowel deve
+# suonare come una vocale: su hardware le gobbe che si muovono con WAVE (risonanza, picco del sync,
+# bande laterali FM) si sentivano come vocali "a ciclo" su tutto il banco.
+ZONE_DEFAULTS = {"reso": (0.05, 0.85, 0.6), "pwm": (0.0, 0.9, 0.0), "vowel": (0.0, 1.0, 0.0),
+                 "sync": (0.1, 0.8, 0.6), "fold": (0.0, 1.0, 0.0), "brass": (0.0, 1.0, 0.0),
+                 "metal": (0.15, 0.8, 0.5)}
+PPG_FLATTEN = 0.4                 # zone PPG: molte onde della ROM hanno formanti forti
+PPG_HARMONICS = waves.HALF - 1    # 63: le onde PPG non hanno armoniche oltre
+
+ZONE_PRESETS = {
+    "ebm": "reso:7,pwm:6,vowel:7,sync:6,metal:5",
+    # synth-pop/EBM con tre wavetable PPG (serve --ppg-rom): sweep pieno (23), densa (26), che si apre (14)
+    "ebm7": "reso:5,pwm:4,vowel:5,sync:4,ppg23:5,ppg26:4,ppg14:4:0.6",
+}
+
+
+def parse_zones(spec: str) -> list[tuple[str, int, float | None]]:
+    """"reso:5,ppg23:5:0.2,..." (o il nome di un preset) -> [(nome, frame, spianatura o None)]."""
+    spec = ZONE_PRESETS.get(spec, spec)
+    out = []
+    for part in spec.split(","):
+        bits = part.strip().split(":")
+        if len(bits) not in (2, 3) or not bits[1].isdigit() or int(bits[1]) < 2:
+            raise ValueError(f"zona '{part}': serve nome:frame (frame >= 2) o nome:frame:spianatura")
+        name = bits[0]
+        if name not in FAMILIES and not (name.startswith("ppg") and name[3:].isdigit()):
+            raise ValueError(f"zona '{name}': famiglie {', '.join(FAMILIES)} oppure ppgN")
+        out.append((name, int(bits[1]), float(bits[2]) if len(bits) == 3 else None))
+    if sum(n for _, n, _ in out) != waves.FRAMES:
+        raise ValueError(f"le zone devono sommare {waves.FRAMES} frame, non {sum(n for _, n, _ in out)}")
+    return out
+
+
+def needs_ppg(spec: str) -> bool:
+    return any(name.startswith("ppg") for name, _, _ in parse_zones(spec))
+
+
+def ppg_family(rom: np.ndarray, keys: list[tuple[int, int]]) -> Callable[[float], np.ndarray]:
+    """Una wavetable PPG come famiglia: p = 0..1 percorre le posizioni 0..60, interpolando fra
+    posizioni vicine come il PPG; ritorna lo spettro (formato FINE) del ciclo a quella posizione."""
+    def make(p: float) -> np.ndarray:
+        x = p * (waves.SLOTS - 1)
+        lo = min(int(x), waves.SLOTS - 2)
+        t = x - lo
+        cycle = (1 - t) * waves.table_slot_cycle(rom, keys, lo)[0] + t * waves.table_slot_cycle(rom, keys, lo + 1)[0]
+        small = np.fft.rfft(cycle - cycle.mean())
+        spec = np.zeros(FINE // 2 + 1, dtype=complex)
+        spec[1:waves.HALF] = small[1:waves.HALF] * (FINE / waves.CYCLE)
+        return spec
+    return make
+
+
+def zone_bank(spec: str, harmonics: int = DEFAULT_HARMONICS, loud: bool = True,
+              rom: np.ndarray | None = None, ppg_tables: list | None = None
+              ) -> tuple[np.ndarray, list[str], list[tuple[str, int, int]]]:
+    """Banco a zone -> ((31, 256) frame, etichetta per frame, [(zona, primo WAVE, ultimo WAVE)])."""
+    frames, labels, ranges, k = [], [], [], 1
+    for name, n, flat in parse_zones(spec):
+        if name.startswith("ppg"):
+            t = int(name[3:])
+            if rom is None or ppg_tables is None:
+                raise ValueError(f"zona {name}: serve --ppg-rom (copia locale dei dati PPG)")
+            if not 0 <= t < len(ppg_tables):
+                raise ValueError(f"zona {name}: wavetable PPG 0..{len(ppg_tables) - 1}")
+            make, p0, p1 = ppg_family(rom, ppg_tables[t]), 0.0, 1.0
+            flat = PPG_FLATTEN if flat is None else flat
+            h = min(harmonics, PPG_HARMONICS)
+        else:
+            p0, p1, default_flat = ZONE_DEFAULTS[name]
+            make, flat, h = FAMILIES[name][1], default_flat if flat is None else flat, harmonics
+        if flat:
+            make = deformant(make, flat)
+        part = family(lambda p, m=make, a=p0, b=p1: m(a + (b - a) * p), n=n, harmonics=h, loud=loud)
+        frames.append(part)
+        labels += [f"{name} p={p0 + (p1 - p0) * p:.2f}" for p in np.linspace(0, 1, n)]
+        ranges.append((name, 4 * k, 4 * (k + n - 1)))
+        k += n
+    return np.concatenate(frames), labels, ranges
+
 
 TABLES = {**{k: d for k, (d, _) in FAMILIES.items()},
           "ebm": "zone: reso (WAVE 4-28), pwm (32-52), vowel (56-80), sync (84-104), metal (108-124)"}
 
 
-def zones() -> list[tuple[str, int, int]]:
-    """Banco ebm: (famiglia, primo WAVE, ultimo WAVE) per zona."""
+def zones(spec: str = "ebm") -> list[tuple[str, int, int]]:
+    """(zona, primo WAVE, ultimo WAVE) per ogni zona di un banco a zone."""
     out, k = [], 1
-    for name, n, *_ in EBM_ZONES:
+    for name, n, _ in parse_zones(spec):
         out.append((name, 4 * k, 4 * (k + n - 1)))
         k += n
     return out
 
 
 def table(name: str, harmonics: int = DEFAULT_HARMONICS, loud: bool = True) -> tuple[np.ndarray, list[str]]:
-    """(31, 256) frame float e un'etichetta per frame."""
+    """(31, 256) frame float e un'etichetta per frame: una famiglia intera, o il banco ebm."""
     if name in FAMILIES:
         make = FAMILIES[name][1]
         return (family(make, harmonics=harmonics, loud=loud),
                 [f"{name} p={p:.2f}" for p in np.linspace(0, 1, waves.FRAMES)])
     if name != "ebm":
         raise KeyError(f"tabella sconosciuta '{name}': {', '.join(TABLES)}")
-    frames, labels = [], []
-    for fam, n, p0, p1, flat in EBM_ZONES:
-        make = deformant(FAMILIES[fam][1], flat) if flat else FAMILIES[fam][1]
-        part = family(lambda p, m=make, a=p0, b=p1: m(a + (b - a) * p), n=n, harmonics=harmonics, loud=loud)
-        frames.append(part)
-        labels += [f"{fam} p={p0 + (p1 - p0) * p:.2f}" for p in np.linspace(0, 1, n)]
-    return np.concatenate(frames), labels
+    frames, labels, _ = zone_bank("ebm", harmonics, loud)
+    return frames, labels

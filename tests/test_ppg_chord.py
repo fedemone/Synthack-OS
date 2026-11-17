@@ -571,3 +571,47 @@ def test_ebm_only_vowel_zone_talks():
     assert prom["reso"] <= 8 and prom["sync"] <= 8 and prom["pwm"] <= 8 and prom["metal"] <= 12
     for name in ("reso", "sync"):                    # le tabelle singole restano "parlanti"
         assert np.median([tables.formant_prominence(x) for x in tables.table(name)[0]]) > 10
+
+
+# ------------------------------------------------------------ banchi a zone (famiglie + wavetable PPG)
+
+def test_parse_zones():
+    assert tables.parse_zones("ebm") == [("reso", 7, None), ("pwm", 6, None), ("vowel", 7, None),
+                                         ("sync", 6, None), ("metal", 5, None)]
+    z = tables.parse_zones("ebm7")
+    assert sum(n for _, n, _ in z) == 31 and z[-1] == ("ppg14", 4, 0.6)
+    for bad in ("reso:30", "reso:31,ppgX:0", "nope:31", "reso:1,pwm:30"):
+        with pytest.raises(ValueError):
+            tables.parse_zones(bad)
+    assert tables.needs_ppg("ebm7") and not tables.needs_ppg("ebm")
+
+
+def test_ebm_preset_equals_ebm_table():
+    a, _ = tables.table("ebm")
+    b, _, ranges = tables.zone_bank("ebm")
+    assert np.array_equal(a, b) and ranges == tables.zones("ebm")
+
+
+def test_zone_bank_with_ppg_tables(tmp_path):
+    f, rom = synthetic_rom(tmp_path)
+    r, t = waves.parse_ppg_rom(f), waves.parse_ppg_wavetables(f)
+    frames, labels, ranges = tables.zone_bank("pwm:16,ppg0:15", rom=r, ppg_tables=t)
+    assert frames.shape == (31, 256) and (frames[:, 0] == 0).all()
+    assert ranges == [("pwm", 4, 64), ("ppg0", 68, 124)] and labels[16].startswith("ppg0")
+    mag = np.abs(np.fft.rfft(frames[16:], axis=1))
+    assert mag[:, 64:].max() < 1e-9 * mag.max()                 # zone PPG: al massimo 63 armoniche
+    with pytest.raises(ValueError, match="ppg-rom"):
+        tables.zone_bank("pwm:16,ppg0:15")
+    with pytest.raises(ValueError, match="0..1"):
+        tables.zone_bank("pwm:16,ppg5:15", rom=r, ppg_tables=t)
+
+
+def test_cli_zones(tmp_path, monkeypatch):
+    f, _ = synthetic_rom(tmp_path)
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    none = str(tmp_path / "n.syx")
+    with pytest.raises(SystemExit, match="ppg-rom"):
+        mp.main(["build", "--stock", none, "--zones", "pwm:16,ppg1:15"])
+    assert mp.main(["build", "--stock", none, "--zones", "pwm:16,ppg1:15", "--ppg-rom", str(f)]) == 0
+    spec = json.loads((tmp_path / "patch.json").read_text())
+    assert spec["wave"]["source"] == "zones-custom" and spec["wave"]["frames"]["124"].startswith("ppg1")

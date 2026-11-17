@@ -11,6 +11,7 @@ Sorgenti del banco (una per patch):
     --curated        31 onde ROM scelte: dense, con corpo, non forme di base
     --ppg-waves L    31 onde ROM scelte a mano (--fill-max completa con onde di MAX)
     --designed       le 7 onde progettate in waves.py, interpolate
+    --zones SPEC     banco a zone: famiglie progettate e wavetable PPG, es. il preset ebm7
 
 Comandi:
     python mods/ppg-chord/make_patch.py build   --table ebm             # scrive patch.json
@@ -346,6 +347,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--table", choices=[*tables.TABLES, "all"],
                        help="wavetable progettata per synth-pop/EBM (nostra, senza ROM): "
                             + "; ".join(f"{k}: {v}" for k, v in tables.TABLES.items()))
+        p.add_argument("--zones", metavar="SPEC",
+                       help="banco a zone: preset (" + ", ".join(f"{k} = {v}" for k, v in tables.ZONE_PRESETS.items())
+                            + ") oppure 'nome:frame[:spianatura],...' con famiglie progettate e ppgN "
+                            "(wavetable PPG N, serve --ppg-rom); i frame devono sommare 31")
         p.add_argument("--keep-phase", action="store_true",
                        help="--table: forme d'onda originali; senza, le fasi sono scelte per un picco basso "
                             "(stesso timbro, ~+2..+4 dB di volume)")
@@ -438,9 +443,9 @@ def cmd_build(a: argparse.Namespace, banks: list[tuple[str, np.ndarray, list[str
     spec = build_spec(q, name, a.harmonics, labels)
     (HERE / "patch.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     print(f"patch.json: {name} -> WAVE 4..124 ({BANK_LEN} B a {BANK_ADDR:#x}); WAVE 0 e schermo invariati")
-    if a.table == "ebm":                                   # zone del banco ebm
-        for fam, lo, hi in tables.zones():
-            print(f"  WAVE {lo:3d}-{hi:3d}: {fam}")
+    if a.zone_ranges:                                      # banchi a zone (ebm, --zones)
+        for zone, lo, hi in a.zone_ranges:
+            print(f"  WAVE {lo:3d}-{hi:3d}: {zone}")
     elif not a.table and labels and not labels[0].startswith("posizione"):   # banco curato o lista
         for k, label in enumerate(labels, 1):
             print(f"  WAVE {4 * k:3d}: {label}")
@@ -457,7 +462,22 @@ def cmd_build(a: argparse.Namespace, banks: list[tuple[str, np.ndarray, list[str
 
 
 def resolve_banks(a: argparse.Namespace) -> list[tuple[str, np.ndarray, list[str]]]:
-    """[(nome, (31, 257) int32, etichette)] secondo le opzioni; fissa anche a.harmonics se manca."""
+    """[(nome, (31, 257) int32, etichette)] secondo le opzioni; fissa anche a.harmonics se manca.
+    Per i banchi a zone mette anche le zone in a.zone_ranges (le stampa cmd_build)."""
+    a.zone_ranges = tables.zones("ebm") if a.table == "ebm" else None
+    if a.zones:
+        a.harmonics = a.harmonics or tables.DEFAULT_HARMONICS
+        rom = tabs = None
+        if tables.needs_ppg(a.zones):
+            if not a.ppg_rom:
+                raise SystemExit("--zones con zone ppgN: serve --ppg-rom local/ppg_data.c")
+            rom, tabs = waves.parse_ppg_rom(a.ppg_rom), waves.parse_ppg_wavetables(a.ppg_rom)
+        try:
+            frames, labels, a.zone_ranges = tables.zone_bank(a.zones, a.harmonics, not a.keep_phase, rom, tabs)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+        name = "zones-" + (a.zones if a.zones in tables.ZONE_PRESETS else "custom")
+        return [(name, waves.bank_q31(frames), labels)]
     if a.table:
         a.harmonics = a.harmonics or tables.DEFAULT_HARMONICS
         names = list(tables.TABLES) if a.table == "all" else [a.table]

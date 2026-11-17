@@ -33,6 +33,7 @@ One bank per firmware. Pick it with `build`:
 | 31 curated PPG waves | `--ppg-rom local/ppg_data.c --curated` | yes |
 | Your own PPG waves | `--ppg-rom local/ppg_data.c --ppg-waves 12,40,77,… [--fill-max]` | yes |
 | Our 7 single waves, interpolated | `--designed [names…]` | no |
+| **Zone bank** mixing our families and PPG tables | `--zones ebm7 --ppg-rom local/ppg_data.c`, or your own spec | only for `ppgN` zones |
 
 ### Designed tables
 
@@ -52,6 +53,22 @@ Our own tables, generated in `tables.py`. Each is a smooth 31-frame morph.
 | **`ebm`** | **zones:** reso 4–28 · pwm 32–52 · vowel 56–80 · sync 84–104 · metal 108–124 | variety in one bank (default) |
 
 In `ebm`, only the vowel zone sounds like vowels. The other zones keep their character without "talking" (see [How it works](#how-it-works)).
+
+### Zone banks
+
+A zone bank puts several small tables into the 31 frames: WAVE picks the zone, and an LFO with a small depth sweeps inside it. `--zones` takes a preset or a list of `name:frames[:flatten]`. The name is one of our families or `ppgN` (PPG wavetable N), and the frames must add up to 31.
+
+| Preset | Zones (WAVE) | Needs |
+|---|---|---|
+| `ebm` | reso 4–28 · pwm 32–52 · vowel 56–80 · sync 84–104 · metal 108–124 | nothing (same as `--table ebm`) |
+| `ebm7` | reso 4–20 · pwm 24–36 · vowel 40–56 · sync 60–72 · **PPG 23** 76–92 · **PPG 26** 96–108 · **PPG 14** 112–124 | `--ppg-rom` |
+
+- **Processing:** PPG zones go through the same steps as our tables (louder phases, phase-continuous alignment, at most 63 harmonics). Their formant bumps are flattened by 0.4 by default; `ebm7` uses 0.6 for PPG 14, which talks more.
+- **Measured for `ebm7`:**
+  - all zones between −2.2 and −3.4 dBFS, so switching zones doesn't jump in level;
+  - only the vowel zone talks (16 dB; the others 4–10 dB);
+  - in the 5-frame vowel zone each frame is a different vowel, so a blend between two vowels dips about 2 dB.
+- **Your own spec**, for example: `--zones reso:6,pwm:5,vowel:7,ppg23:7,ppg26:6`.
 
 ### PPG ROM sources
 

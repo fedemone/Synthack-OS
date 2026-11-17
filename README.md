@@ -39,7 +39,10 @@ The committed `mods/ppg-chord/patch.json` is the `ebm` bank, which is ready to b
 ```sh
 python3 mods/ppg-chord/make_patch.py preview --table all --ebm    # listen: WAVs in out/ppg-chord/preview
 python3 mods/ppg-chord/make_patch.py build --table vowel          # or --ppg-rom local/ppg_data.c --ppg-table 7
+python3 mods/ppg-chord/make_patch.py build --zones ebm7 --ppg-rom local/ppg_data.c   # 7 zones, with PPG tables 23, 26, 14
 ```
+
+Banks built from the PPG data (`--ppg-rom`) contain data derived from the PPG ROM: build them locally and keep them private; don't commit that `patch.json`.
 
 ### 3. Build
 
