@@ -555,3 +555,17 @@ def test_cli_keep_phase(tmp_path, monkeypatch):
     mp.main(["build", "--stock", none, "--table", "vowel"])
     loud = mp.read_bank(bytes.fromhex(json.loads((tmp_path / "patch.json").read_text())["patches"][0]["hex"]))
     assert np.median(_rms_db(loud[:, :256].astype(float)) - _rms_db(plain[:, :256].astype(float))) > 2
+
+
+def test_ebm_only_vowel_zone_talks():
+    """Su hardware il banco ebm sembrava pronunciare vocali "a ciclo": solo la zona vowel deve."""
+    f, _ = tables.table("ebm")
+    prom, k = {}, 0
+    for fam, lo, hi in tables.zones():
+        n = (hi - lo) // 4 + 1
+        prom[fam] = np.median([tables.formant_prominence(x) for x in f[k:k + n]])
+        k += n
+    assert prom["vowel"] >= 15
+    assert prom["reso"] <= 8 and prom["sync"] <= 8 and prom["pwm"] <= 8 and prom["metal"] <= 12
+    for name in ("reso", "sync"):                    # le tabelle singole restano "parlanti"
+        assert np.median([tables.formant_prominence(x) for x in tables.table(name)[0]]) > 10

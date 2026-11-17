@@ -47,6 +47,7 @@ These are our own tables, generated in `tables.py`. They need no ROM and are com
     - peak 1.7 dB lower, which leaves headroom.
 
     Partials shared by two chord notes add or partly cancel depending on phase, and that relation drifts as the notes beat. So in chords the gain varies over time, and is smallest at the attack.
+- **Only the vowel zone talks.** In `ebm`, the moving spectral bumps of `reso` (resonance), `sync` (sync peak) and `metal` (FM sidebands) are flattened toward the smooth spectral trend, so they no longer sound like vowels gliding while you sweep. The bump above the trend goes from 16.7 to 6.5 dB in `reso`, 12.5 to 5.0 in `sync`, and 22.2 to 11.1 in `metal` (half, to keep the bells). `vowel` stays at 16 dB. The standalone `reso`, `sync` and `metal` tables keep their talking character.
 - **Phase alignment:** the starting point of all 31 frames (a rising zero, upright or flipped) is chosen jointly, to maximise the similarity along the whole table rather than frame by frame.
 - **`ebm` zones:** pick a zone with WAVE, then sweep inside it per note. LFO in ONE mode with a small depth, e.g. WAVE 4 + 24 for a filter-like bass sweep.
 - **`build` vs `preview`:** `build --table NAME` writes the bank. `preview --table all` renders a chord sweep per table, and `preview --table reso --ebm` a 16th-note bass line where each note sweeps WAVE once.

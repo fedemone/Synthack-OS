@@ -250,10 +250,44 @@ FAMILIES: dict[str, tuple[str, Callable[[float], np.ndarray]]] = {
     "metal": ("FM 1:3, indice 0 -> 6 (campane, metalli)", _fm(3, 6.0)),
 }
 
-# banco misto: (famiglia, frame, p iniziale, p finale)
-EBM_ZONES = [("reso", 7, 0.05, 0.85), ("pwm", 6, 0.0, 0.9), ("vowel", 7, 0.0, 1.0),
-             ("sync", 6, 0.1, 0.8), ("metal", 5, 0.15, 0.8)]
-assert sum(n for _, n, _, _ in EBM_ZONES) == waves.FRAMES
+def _trend(mag: np.ndarray, top: int = 64) -> np.ndarray:
+    """Andamento liscio dello spettro: retta in scala log-log sulle armoniche 1..top non nulle."""
+    h = np.arange(1, mag.size)
+    sel = (h <= top) & (mag[1:] > mag[1:].max() * 1e-4)
+    slope, icpt = np.polyfit(np.log(h[sel]), np.log(mag[1:][sel]), 1)
+    out = np.zeros_like(mag)
+    out[1:] = np.exp(icpt + slope * np.log(h))
+    return out
+
+
+def deformant(make: Callable[[float], np.ndarray], amount: float) -> Callable[[float], np.ndarray]:
+    """Rende un'onda meno "vocale": le gobbe dello spettro (formanti, risonanze, picchi del sync)
+    vengono avvicinate all'andamento liscio. amount 0 = invariata, 1 = gobbe spianate (in dB le
+    gobbe si riducono della frazione amount). Le fasi restano quelle originali."""
+    def wrapped(p: float) -> np.ndarray:
+        spec = make(p)
+        mag = np.abs(spec)
+        env = _trend(mag)
+        new = np.where(mag > 0, mag ** (1 - amount) * np.maximum(env, 1e-30) ** amount, 0.0)
+        return spec * np.divide(new, mag, out=np.zeros_like(mag), where=mag > 0)
+    return wrapped
+
+
+def formant_prominence(frame: np.ndarray, top: int = 40) -> float:
+    """dB della gobba piu' alta sopra l'andamento liscio (armoniche 2..top): quanto "parla" un'onda."""
+    mag = np.abs(np.fft.rfft(frame))
+    env = _trend(mag)
+    h = np.arange(2, top + 1)
+    ok = mag[h] > mag.max() * 1e-4
+    return float(np.max(20 * np.log10(mag[h][ok] / env[h][ok]))) if ok.any() else 0.0
+
+
+# banco misto: (famiglia, frame, p iniziale, p finale, quanto spianare le gobbe)
+# Solo la zona vowel deve suonare come una vocale: reso, sync e metal hanno le gobbe ridotte
+# (con WAVE le gobbe si muovevano e su hardware si sentivano vocali "a ciclo" su tutto il banco).
+EBM_ZONES = [("reso", 7, 0.05, 0.85, 0.6), ("pwm", 6, 0.0, 0.9, 0.0), ("vowel", 7, 0.0, 1.0, 0.0),
+             ("sync", 6, 0.1, 0.8, 0.6), ("metal", 5, 0.15, 0.8, 0.5)]
+assert sum(z[1] for z in EBM_ZONES) == waves.FRAMES
 
 TABLES = {**{k: d for k, (d, _) in FAMILIES.items()},
           "ebm": "zone: reso (WAVE 4-28), pwm (32-52), vowel (56-80), sync (84-104), metal (108-124)"}
@@ -262,7 +296,7 @@ TABLES = {**{k: d for k, (d, _) in FAMILIES.items()},
 def zones() -> list[tuple[str, int, int]]:
     """Banco ebm: (famiglia, primo WAVE, ultimo WAVE) per zona."""
     out, k = [], 1
-    for name, n, _, _ in EBM_ZONES:
+    for name, n, *_ in EBM_ZONES:
         out.append((name, 4 * k, 4 * (k + n - 1)))
         k += n
     return out
@@ -277,8 +311,8 @@ def table(name: str, harmonics: int = DEFAULT_HARMONICS, loud: bool = True) -> t
     if name != "ebm":
         raise KeyError(f"tabella sconosciuta '{name}': {', '.join(TABLES)}")
     frames, labels = [], []
-    for fam, n, p0, p1 in EBM_ZONES:
-        make = FAMILIES[fam][1]
+    for fam, n, p0, p1, flat in EBM_ZONES:
+        make = deformant(FAMILIES[fam][1], flat) if flat else FAMILIES[fam][1]
         part = family(lambda p, m=make, a=p0, b=p1: m(a + (b - a) * p), n=n, harmonics=harmonics, loud=loud)
         frames.append(part)
         labels += [f"{fam} p={p0 + (p1 - p0) * p:.2f}" for p in np.linspace(0, 1, n)]
