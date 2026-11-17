@@ -42,7 +42,11 @@ These are our own tables, generated in `tables.py`. They need no ROM and are com
 - **Louder by default, same timbre.** Every frame is at full peak, like the stock frames, so the level depends on how "peaky" the waveform is. The ear hears the harmonic levels, not their phase alignment, so the tables keep each frame's exact harmonic levels and choose the phases for a low peak.
   - **Gain** (frame RMS): `reso` +4.1 dB, `vowel` +4.7, `sync` +3.9, `pwm` +2.5. The `ebm` bank goes from −7.0 to −3.0 dBFS median, about 2 dB above the stock bank. `fold`, `brass` and `metal` were already low-peak.
   - **Continuity:** each frame starts from its neighbour's phases and must stay similar to it (≥ 0.75 where achievable), so WAVE sweeps stay smooth. No frame gets quieter. `--keep-phase` keeps the original waveforms.
-  - **Rendered:** in offline single-note and chord renders the gain holds at every root (+2 to +3.7 dB per zone). In a short chord, partials shared by two notes can add or partly cancel, so a given chord at a given instant can deviate.
+  - **Rendered:** in offline single-note and chord renders the gain holds at every root (+2 to +3.7 dB per zone). In the original engine (emulator, a 2 s SY CHORD chord at WAVE 64, `vowel` zone):
+    - −0.4 dB in the first 0.35 s, then +0.5, +3.3, +3.8 and +2.0 dB in the following 0.4 s windows; +1.0 dB over the whole note;
+    - peak 1.7 dB lower, which leaves headroom.
+
+    Partials shared by two chord notes add or partly cancel depending on phase, and that relation drifts as the notes beat. So in chords the gain varies over time, and is smallest at the attack.
 - **Phase alignment:** the starting point of all 31 frames (a rising zero, upright or flipped) is chosen jointly, to maximise the similarity along the whole table rather than frame by frame.
 - **`ebm` zones:** pick a zone with WAVE, then sweep inside it per note. LFO in ONE mode with a small depth, e.g. WAVE 4 + 24 for a filter-like bass sweep.
 - **`build` vs `preview`:** `build --table NAME` writes the bank. `preview --table all` renders a chord sweep per table, and `preview --table reso --ebm` a 16th-note bass line where each note sweeps WAVE once.
