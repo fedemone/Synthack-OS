@@ -25,6 +25,7 @@ The bank layout comes from [syntakt-firmware-workbench](https://github.com/Bezro
 
 - **A PPG wavetable** (0–28) from your **local** copy of wave-stuff's `data/ppg_data.c`. Keep it in `local/` (git-ignored). A `patch.json` built from it contains data derived from that ROM.
 - **A curated bank** (`--curated`): 31 single ROM waves instead of one table. The ROM holds 241 distinct waves for 31 frames, so a choice is made:
+  - waves **without body** are dropped: harmonics 1–3 must carry at least 70 % of the energy (`--min-body`, default 0.7). Without this rule the "most different" waves were almost all high harmonics: body 0.29 against 0.96 for the stock bank. On hardware they sounded short and thin, because the closing low-pass filter removes nearly all of such a wave. In the emulator, same sound: 3.4 dB quieter and decaying 3 dB faster than stock. With the rule the bank's body is 0.89; it sounds as loud as MAX's bank and sustains like stock. 62 non-basic PPG waves pass.
   - empty waves, duplicates and **basic shapes** are dropped. A wave counts as basic when its spectrum is ≥ 0.95 similar to a sine, saw, square, triangle or 6–38 % pulse; that's 55 of the 241, leaving 186.
   - the 31 most different from each other are kept;
   - they are ordered so that each wave resembles the next. The order starts from the darkest and roughly brightens; neighbour similarity rises from ~0.25 to ~0.6, so SY CHORD's blends between frames stay musical. `--order brightness` gives a strict dark → bright order instead.
@@ -32,6 +33,29 @@ The bank layout comes from [syntakt-firmware-workbench](https://github.com/Bezro
 - **Our 7 designed waves** (`--designed`): hollow, brass, vox, glass, reso, sync, organ. They are spread over the table in order and interpolated. You can give your own order, for example `--designed vox glass reso`. These need no ROM, and the committed `patch.json` is this table.
 
 ![designed waves](waves.png)
+
+## Making it move like a PPG
+
+Measured in the original engine: **SY CHORD never moves through the bank by itself.** At a fixed WAVE it reads only the one or two frames at that position for the whole note. The output is bit-identical with every other frame silenced.
+
+On a PPG Wave, the evolving sound comes from **modulating the wavetable position on every note**, mainly with an envelope, plus LFO and keyboard. A fixed position gives a static timbre there too.
+
+On the Syntakt, do the same with the track LFO on the SY CHORD track:
+
+| Goal | LFO setting |
+|---|---|
+| PPG-style sweep on each note (envelope → wavetable) | DEST = WAVE (SYN page), MODE = ONE (runs once per trig), a ramp/exponential shape, DEP sets how far it sweeps, SPD/MULT how fast |
+| Continuous cycling while the note holds | DEST = WAVE, MODE = TRG or FREE, TRI or SIN |
+| A different wave on every note | DEST = WAVE, Déjà Vu DV-T (MAX), or p-locks on WAVE per step |
+
+Also check the amp envelope (decay/sustain) and the filter envelope of the sound.
+
+**Which bank to use:**
+- **Wavetable mode** is the PPG-like choice for sweeps: neighbouring frames are related, so the sweep is a smooth morph.
+- **The curated bank** is a palette of 31 distinct timbres: better picked with p-locks than swept.
+- **Tables with plenty of body:** 3, 6, 7, 8, 12, 16, 17, 19, 22, 23, 24, 25, 28. The catalog shows each table's body; thin tables are marked.
+
+`build` prints the body of the bank it writes, next to stock (0.96) and MAX (0.76).
 
 ## Use
 

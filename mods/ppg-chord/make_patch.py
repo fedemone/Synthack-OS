@@ -170,6 +170,14 @@ def emu_render(region: bytes | None, wave: int, note: int, seconds: float) -> li
     return out
 
 
+def body_report(q31: np.ndarray) -> str:
+    """Corpo del banco (quota di energia nelle armoniche 1-3), confrontato con stock e MAX."""
+    b = np.array([waves.body(f) for f in np.asarray(q31)[:, :waves.FRAME_SAMPLES].astype(np.float64)])
+    note = "" if np.median(b) >= 0.5 else "  <- poco corpo: col filtro che si chiude suonera' corto e piano"
+    return (f"corpo (energia armoniche 1-3): mediana {np.median(b):.2f}, minimo {b.min():.2f} "
+            f"(stock 0.96, MAX 0.76){note}")
+
+
 # ------------------------------------------------------------------ banco curato
 
 def max_frames(threshold: float = 0.95, basic: bool = False) -> list[tuple[str, np.ndarray]]:
@@ -203,7 +211,10 @@ def curated(a: argparse.Namespace) -> tuple[str, np.ndarray, list[str]]:
             raise SystemExit(f"--ppg-waves: al massimo {waves.FRAMES} onde, non {len(idx)}")
         name = "ppg-custom"
     else:
-        idx = waves.curate(rom, waves.FRAMES, a.basic_threshold)
+        try:
+            idx = waves.curate(rom, waves.FRAMES, a.basic_threshold, a.min_body)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
         name = "ppg-curated"
     items = [(f"PPG #{i}", waves.condition(waves.ppg_expand(rom[i]), a.harmonics)) for i in idx]
     if len(items) < waves.FRAMES:
@@ -266,6 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--order", choices=("smooth", "brightness"), default="smooth",
                        help="banco curato: smooth = ogni onda simile alla successiva (default), "
                             "brightness = da scura a brillante")
+        p.add_argument("--min-body", type=float, default=waves.MIN_BODY,
+                       help="banco curato: quota minima di energia nelle armoniche 1-3 (default 0.7; stock 0.96, "
+                            "MAX 0.76). Onde senza corpo suonano corte e piano col filtro che si chiude")
         p.add_argument("--basic-threshold", type=float, default=0.95,
                        help="somiglianza (0..1) oltre la quale un'onda conta come forma di base")
         p.add_argument("--harmonics", type=int, default=40,
@@ -316,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"patch.json: {name} -> WAVE 4..124 ({BANK_LEN} B a {BANK_ADDR:#x}); WAVE 0 e schermo invariati")
         for k, label in enumerate(labels, 1):
             print(f"  WAVE {4 * k:3d}: {label}")
+        print(body_report(q))
         return 0
     if a.curated or a.ppg_waves:
         raise SystemExit("--curated / --ppg-waves richiedono --ppg-rom")
@@ -344,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     spec = build_spec(q, name, a.harmonics)
     (HERE / "patch.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     print(f"patch.json: {name} -> WAVE 4..124 ({BANK_LEN} B a {BANK_ADDR:#x}); WAVE 0 e schermo invariati")
+    print(body_report(q))
     if a.emu:
         if sec7 is None:
             raise SystemExit("--emu richiede l'OS stock")

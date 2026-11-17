@@ -312,15 +312,28 @@ def brightness(cycle: np.ndarray) -> float:
     return float((np.arange(1, m.size + 1) * m).sum() / (m.sum() or 1))
 
 
-def candidates(rom: np.ndarray, threshold: float = 0.95) -> list[int]:
-    """Indici delle onde ROM non vuote, non doppie, non forme di base."""
+def body(cycle: np.ndarray, n: int = 3) -> float:
+    """Quota dell'energia nelle armoniche 1..n (su 1..40): il "corpo" dell'onda.
+
+    Misurato su hardware emulato: un banco con poco corpo (onde quasi senza fondamentale) suona
+    piu' corto e piu' piano, perche' il filtro passa-basso che si chiude toglie quasi tutto. Banco
+    stock: mediana 0.96; banco di MAX: 0.76; banco "piu' diverso" senza vincolo: 0.29.
+    """
+    mag = np.abs(np.fft.rfft(np.asarray(cycle, dtype=np.float64)))[1:BAND + 1]
+    e = mag ** 2
+    return float(e[:n].sum() / (e.sum() or 1))
+
+
+def candidates(rom: np.ndarray, threshold: float = 0.95, min_body: float = 0.0) -> list[int]:
+    """Indici delle onde ROM non vuote, non doppie, non forme di base, con corpo >= min_body."""
     seen, out = set(), []
     for i, h in enumerate(rom):
         key = h.tobytes()
         if np.ptp(h) < 4 or key in seen:
             continue
         seen.add(key)
-        if basic_shape(ppg_expand(h), threshold) is None:
+        c = ppg_expand(h)
+        if basic_shape(c, threshold) is None and body(c) >= min_body:
             out.append(i)
     return out
 
@@ -341,9 +354,14 @@ def most_diverse(cycles: list[np.ndarray], n: int) -> list[int]:
     return picked
 
 
-def curate(rom: np.ndarray, n: int = FRAMES, threshold: float = 0.95) -> list[int]:
-    """Le n onde ROM piu' diverse fra quelle non di base, ordinate da scure a brillanti."""
-    cand = candidates(rom, threshold)
+MIN_BODY = 0.7                                 # default di --curated (vedi body())
+
+
+def curate(rom: np.ndarray, n: int = FRAMES, threshold: float = 0.95, min_body: float = MIN_BODY) -> list[int]:
+    """Le n onde ROM piu' diverse fra quelle non di base e con corpo, ordinate da scure a brillanti."""
+    cand = candidates(rom, threshold, min_body)
+    if len(cand) < n:
+        raise ValueError(f"solo {len(cand)} onde con corpo >= {min_body}: abbassa --min-body o usa --fill-max")
     cyc = [ppg_expand(rom[i]) for i in cand]
     picked = [cand[k] for k in most_diverse(cyc, n)]
     return sorted(picked, key=lambda i: brightness(ppg_expand(rom[i])))

@@ -48,13 +48,20 @@ def build(ppg_rom: Path | None, out: Path, cmd: str = "python mods/ppg-chord/mak
             key = h.astype(np.uint8).tobytes()
             dup = seen.setdefault(key, i)
             data["rom"].append({"b": round(_brightness(c), 1), "empty": int(np.ptp(h) < 4),
-                                "dup": dup if dup != i else -1, "basic": waves.basic_shape(c) or ""})
+                                "dup": dup if dup != i else -1, "basic": waves.basic_shape(c) or "",
+                                "body": round(waves.body(c), 2)})
         data["romCycles"] = _b64_cycles(cycles)
         # il banco curato di default (stesso calcolo di make_patch.py build --curated)
-        picked = waves.curate(rom)
+        try:
+            picked = waves.curate(rom)
+        except ValueError:                       # ROM troppo piccola per 31 onde con corpo
+            picked = []
         frames = [waves.condition(cycles[i]) for i in picked]
-        data["curated"] = [picked[k] for k in waves.order_smooth(frames)]
-        data["tables"] = [[[p, w] for p, w in keys] for keys in waves.parse_ppg_wavetables(ppg_rom)]
+        data["curated"] = [picked[k] for k in waves.order_smooth(frames)] if picked else []
+        tables = waves.parse_ppg_wavetables(ppg_rom)
+        data["tables"] = [[[p, w] for p, w in keys] for keys in tables]
+        data["tableBody"] = [round(float(np.median([waves.body(c) for c in waves.table_cycles(rom, k)])), 2)
+                             for k in tables]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(PAGE.replace("/*DATA*/null", json.dumps(data, separators=(",", ":")))
                    .replace("__TITLE__", html.escape("PPG Chord Waves")), encoding="utf-8")
@@ -89,6 +96,7 @@ code{font:12px ui-monospace,monospace;word-break:break-all}.desc{font-size:12px;
  <select id="sort"><option value="i">by number</option><option value="b">by brightness</option></select>
  <label class="note"><input type="checkbox" id="hide" checked> hide empty/duplicates</label>
  <label class="note"><input type="checkbox" id="hidebasic"> hide basic shapes</label>
+ <label class="note"><input type="checkbox" id="hidethin"> hide thin waves (body &lt; 0.7)</label>
  <button id="usestars">Starred ROM waves → bank</button>
  <label class="note"><input type="checkbox" id="stars"> starred only</label>
  <select id="chord"><option value="0,3,7,12">minor</option><option value="0,4,7,12">major</option><option value="0,5,7,12">sus4</option><option value="0,3,7,10">min7</option><option value="0,7,12">fifth</option><option value="0">single note</option></select>
@@ -136,23 +144,26 @@ function render(){document.querySelectorAll("[data-tab]").forEach(b=>b.classList
   L.filter(w=>!only||stars.has("d:"+w.name)).forEach(w=>{const c=card("d:"+w.name,w.name,"bright "+w.b,cyc(DC,w.i),"--designed");c.title=w.desc;G.append(c)});M.append(G);return}
  if(tab==="rom"){const G=document.createElement("div");G.className="grid";let L=D.rom.map((w,i)=>({...w,i}));if(hide)L=L.filter(w=>!w.empty&&w.dup<0);if(srt==="b")L.sort((a,b)=>a.b-b.b);
   if(document.getElementById("hidebasic").checked)L=L.filter(w=>!w.basic);
-  L.filter(w=>!only||stars.has("w:"+w.i)).forEach(w=>G.append(card("w:"+w.i,"#"+w.i,w.empty?"empty":w.dup>=0?"= #"+w.dup:w.basic?w.basic:"bright "+w.b,cyc(RC,w.i),"",w.basic?"off":"")));
-  M.insertAdjacentHTML("beforeend",`<p class="note">${L.length} of ${D.rom.length} waves shown. Dimmed = close to a basic shape (sine, saw, square, triangle, pulse). Star up to 31 and press “Starred ROM waves → bank”.</p>`);M.append(G);return}
+  if(document.getElementById("hidethin").checked)L=L.filter(w=>w.body>=0.7);
+  L.filter(w=>!only||stars.has("w:"+w.i)).forEach(w=>G.append(card("w:"+w.i,"#"+w.i,w.empty?"empty":w.dup>=0?"= #"+w.dup:w.basic?w.basic:"body "+w.body,cyc(RC,w.i),"",w.basic?"off":"")));
+  M.insertAdjacentHTML("beforeend",`<p class="note">${L.length} of ${D.rom.length} waves shown. Dimmed = close to a basic shape (sine, saw, square, triangle, pulse). “body” = share of energy in harmonics 1–3: below ~0.5 a wave sounds thin and short once the filter closes (stock bank ≈ 0.96, MAX ≈ 0.76). Star up to 31 and press “Starred ROM waves → bank”.</p>`);M.append(G);return}
+ if(tab==="curated"&&!D.curated.length){M.innerHTML='<p class="note">Not enough waves with body in this ROM for a curated bank of 31.</p>';return}
  if(tab==="curated"){const keys=D.curated.map((w,i)=>[2*i,w]);
-  M.insertAdjacentHTML("beforeend",`<p class="note">31 ROM waves chosen automatically: no empty, duplicate or basic-shape waves; the most different from each other; ordered so each wave resembles the next (smooth morphing as WAVE turns). <button id="cs">▶ sweep</button></p>`);
+  M.insertAdjacentHTML("beforeend",`<p class="note">31 ROM waves chosen automatically: no empty, duplicate or basic-shape waves, body ≥ 0.7; the most different from each other; ordered so each wave resembles the next (smooth morphing as WAVE turns). <button id="cs">▶ sweep</button></p>`);
   const args=rom+"--curated";document.getElementById("cs").onclick=()=>{sweep(keys);document.getElementById("sel").textContent="Curated bank: WAVE 4 → 124";document.getElementById("cmd").textContent=D.cmd+" build "+args};
   const G=document.createElement("div");G.className="grid";
   D.curated.forEach((w,i)=>G.append(card("w:"+w,"W"+(4+4*i),"#"+w+" · bright "+D.rom[w].b,cyc(RC,w),args)));M.append(G);return}
  D.tables.forEach((keys,t)=>{const S=document.createElement("div");S.className="tbl";
   const args=rom+`--ppg-table ${t}`;
-  S.innerHTML=`<h3>Wavetable ${t}<button>▶ sweep</button></h3><div class="keys">key waves (slot→wave): ${keys.map(k=>k[0]+"→#"+k[1]).join("  ")} · dim slots are skipped (only even slots become frames)</div>`;
+  const tb=(D.tableBody||[])[t];
+  S.innerHTML=`<h3>Wavetable ${t}${tb!==undefined?` <span class="note">body ${tb}${tb<0.5?" (thin)":""}</span>`:""}<button>▶ sweep</button></h3><div class="keys">key waves (slot→wave): ${keys.map(k=>k[0]+"→#"+k[1]).join("  ")} · dim slots are skipped (only even slots become frames)</div>`;
   S.querySelector("button").onclick=()=>{sweep(keys);document.getElementById("sel").textContent="Wavetable "+t+": WAVE 4 → 124";document.getElementById("cmd").textContent=D.cmd+" build "+args};
   const G=document.createElement("div");G.className="strip";
   for(let s=0;s<61;s++){const id="t:"+t+":"+s;if(only&&!stars.has(id))continue;const isKey=keys.some(k=>k[0]===s),used=s%2===0;
    G.append(card(id,used?"W"+(4+2*s):t+"/"+s,isKey?"key":"",slotCycle(keys,s),args,(isKey?"key ":"")+(used?"":"off")))}
   if(G.children.length){S.append(G);M.append(S)}})}
 document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render()});
-["sort","hide","stars","hidebasic"].forEach(i=>document.getElementById(i).onchange=render);
+["sort","hide","stars","hidebasic","hidethin"].forEach(i=>document.getElementById(i).onchange=render);
 document.getElementById("usestars").onclick=()=>{const w=[...stars].filter(s=>s.startsWith("w:")).map(s=>+s.slice(2)).sort((a,b)=>a-b);
  const sel=document.getElementById("sel"),cmd=document.getElementById("cmd");
  if(!w.length){sel.textContent="Star some ROM waves first (up to 31).";cmd.textContent="";return}

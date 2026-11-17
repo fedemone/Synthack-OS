@@ -1,7 +1,7 @@
 {
   "name": "ppg-chord",
   "os": "1.41",
-  "description": "SY CHORD: wavetable designed nei frame WAVE 4..124 (40 armoniche); WAVE 0 e immagini dello schermo invariati.",
+  "description": "SY CHORD: designed nei frame WAVE 4..124 (40 armoniche); WAVE 0 e immagini dello schermo invariati.",
   "generated_by": "mods/ppg-chord/make_patch.py",
   "conflicts": [
     "sy-chord"

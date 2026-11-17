@@ -310,7 +310,7 @@ def test_curate_skips_empty_duplicates_and_basic(tmp_path):
     # i seni sono "forme di base" solo se la fondamentale domina: l'onda 0 (fondamentale) lo e'
     cand = waves.candidates(rom)
     assert 0 not in cand and 5 not in cand and 6 not in cand
-    picked = waves.curate(rom, 3)
+    picked = waves.curate(rom, 3, min_body=0.0)
     assert len(picked) == 3 and set(picked) <= set(cand)
     b = [waves.brightness(waves.ppg_expand(rom[i])) for i in picked]
     assert b == sorted(b)
@@ -365,3 +365,29 @@ def test_cli_custom_list_with_max_fill(tmp_path, monkeypatch):
     assert nonbasic <= set(labels)
     q = mp.read_bank(bytes.fromhex(spec["patches"][0]["hex"]))
     assert (q[:, 0] == 0).all() and (q[:, 256] == 0).all() and np.abs(q).max() == waves.PEAK
+
+
+def test_body_measures_low_harmonic_energy():
+    t = np.arange(128) / 128
+    assert waves.body(np.sin(2 * np.pi * t)) > 0.99                          # tutta nella fondamentale
+    assert waves.body(np.sin(2 * np.pi * 9 * t)) < 0.01                      # tutta in alto
+    assert 0.45 < waves.body(np.sin(2 * np.pi * t) + np.sin(2 * np.pi * 9 * t)) < 0.55
+
+
+def test_curated_bank_requires_body(tmp_path):
+    f, _ = synthetic_rom(tmp_path)                 # seni sulle armoniche 1..8: corpo solo per 1..3
+    rom = waves.parse_ppg_rom(f)
+    assert waves.candidates(rom, min_body=0.7) == [1, 2]        # 0 = seno (forma di base), 3+ = senza corpo
+    with pytest.raises(ValueError, match="corpo"):
+        waves.curate(rom, 3)                                     # default 0.7: non bastano
+    assert len(waves.curate(rom, 3, min_body=0.0)) == 3
+
+
+def test_body_report_flags_thin_banks():
+    thin = np.zeros((31, 257), dtype=np.int64)
+    t = np.arange(256) / 256
+    thin[:, :256] = np.round(np.sin(2 * np.pi * 9 * t) * waves.PEAK)
+    assert "poco corpo" in mp.body_report(thin)
+    full = thin.copy()
+    full[:, :256] = np.round(np.sin(2 * np.pi * t) * waves.PEAK)
+    assert "poco corpo" not in mp.body_report(full)
