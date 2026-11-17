@@ -502,3 +502,56 @@ def test_identify_bank():
     if mine["wave"]["source"] != "table-vowel":
         assert mp.identify_bank(mp.bank_bytes(other)).startswith("un altro banco")
     assert mp.identify_bank(bytes(mp.BANK_LEN)).startswith("un altro") or True
+
+
+# ------------------------------------------------------------ volume: fasi a picco basso
+
+def _rms_db(f):
+    return 20 * np.log10(np.sqrt((np.asarray(f) ** 2).mean(axis=1)))
+
+
+def _within_corr(name, f):
+    pairs = []
+    if name == "ebm":
+        k0 = 0
+        for _, lo, hi in tables.zones():
+            n = (hi - lo) // 4 + 1
+            pairs += [(k, k + 1) for k in range(k0, k0 + n - 1)]
+            k0 += n
+    else:
+        pairs = [(k, k + 1) for k in range(30)]
+    return [f[a] @ f[b] / np.linalg.norm(f[a]) / np.linalg.norm(f[b]) for a, b in pairs]
+
+
+@pytest.mark.parametrize("name", list(tables.TABLES))
+def test_loud_tables_keep_spectrum_and_are_never_quieter(name):
+    plain, _ = tables.table(name, loud=False)
+    loud, _ = tables.table(name)
+    for a, b in zip(plain, loud):                      # stesso timbro: stesse ampiezze armoniche relative
+        ma, mb = np.abs(np.fft.rfft(a)), np.abs(np.fft.rfft(b))
+        assert np.allclose(ma / ma.max(), mb / mb.max(), atol=1e-6)
+    gain = _rms_db(loud) - _rms_db(plain)
+    assert gain.min() > -1.0                           # nessun frame sensibilmente piu' piano
+
+
+def test_loud_tables_are_louder_where_it_matters():
+    for name in ("reso", "vowel", "sync", "ebm"):
+        gain = _rms_db(tables.table(name)[0]) - _rms_db(tables.table(name, loud=False)[0])
+        assert np.median(gain) >= 2.0, (name, np.median(gain))
+
+
+@pytest.mark.parametrize("name", list(tables.TABLES))
+def test_loud_tables_stay_continuous(name):
+    plain = _within_corr(name, tables.table(name, loud=False)[0])
+    loud = _within_corr(name, tables.table(name)[0])
+    assert min(loud) >= min(tables.MIN_NEIGHBOUR, min(plain)) - 0.06, (name, min(plain), min(loud))
+
+
+def test_cli_keep_phase(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    none = str(tmp_path / "n.syx")
+    mp.main(["build", "--stock", none, "--table", "vowel", "--keep-phase"])
+    plain = mp.read_bank(bytes.fromhex(json.loads((tmp_path / "patch.json").read_text())["patches"][0]["hex"]))
+    mp.main(["build", "--stock", none, "--table", "vowel"])
+    loud = mp.read_bank(bytes.fromhex(json.loads((tmp_path / "patch.json").read_text())["patches"][0]["hex"]))
+    assert np.median(_rms_db(loud[:, :256].astype(float)) - _rms_db(plain[:, :256].astype(float))) > 2

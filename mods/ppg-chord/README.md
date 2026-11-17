@@ -39,6 +39,11 @@ These are our own tables, generated in `tables.py`. They need no ROM and are com
 | **`ebm`** | **zones:** reso WAVE 4–28 · pwm 32–52 · vowel 56–80 · sync 84–104 · metal 108–124 | variety in one bank; **the committed default** |
 
 - **Band limit:** these are brighter than the PPG conversions: 64 harmonics by default instead of 40, up to 127 with `--harmonics`.
+- **Louder by default, same timbre.** Every frame is at full peak, like the stock frames, so the level depends on how "peaky" the waveform is. The ear hears the harmonic levels, not their phase alignment, so the tables keep each frame's exact harmonic levels and choose the phases for a low peak.
+  - **Gain** (frame RMS): `reso` +4.1 dB, `vowel` +4.7, `sync` +3.9, `pwm` +2.5. The `ebm` bank goes from −7.0 to −3.0 dBFS median, about 2 dB above the stock bank. `fold`, `brass` and `metal` were already low-peak.
+  - **Continuity:** each frame starts from its neighbour's phases and must stay similar to it (≥ 0.75 where achievable), so WAVE sweeps stay smooth. No frame gets quieter. `--keep-phase` keeps the original waveforms.
+  - **Rendered:** in offline single-note and chord renders the gain holds at every root (+2 to +3.7 dB per zone). In a short chord, partials shared by two notes can add or partly cancel, so a given chord at a given instant can deviate.
+- **Phase alignment:** the starting point of all 31 frames (a rising zero, upright or flipped) is chosen jointly, to maximise the similarity along the whole table rather than frame by frame.
 - **`ebm` zones:** pick a zone with WAVE, then sweep inside it per note. LFO in ONE mode with a small depth, e.g. WAVE 4 + 24 for a filter-like bass sweep.
 - **`build` vs `preview`:** `build --table NAME` writes the bank. `preview --table all` renders a chord sweep per table, and `preview --table reso --ebm` a 16th-note bass line where each note sweeps WAVE once.
 

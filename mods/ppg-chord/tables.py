@@ -49,47 +49,147 @@ def _from_sine_series(b: np.ndarray) -> np.ndarray:
 
 
 def _frame(spec: np.ndarray, harmonics: int, prev: np.ndarray | None) -> np.ndarray:
-    """Spettro -> frame di 256 campioni: banda limitata, partenza su uno zero in salita, picco 1."""
+    """Spettro -> frame di 256 campioni: banda limitata, partenza su uno zero in salita, picco 1.
+
+    Primo frame: lo zero in salita piu' vicino all'inizio del ciclo. Poi: fra tutti gli zeri in
+    salita, della forma e della forma capovolta (che da sola suona identica), quello che rende il
+    frame piu' simile al precedente: l'interpolazione di SY CHORD fra frame vicini non si svuota."""
     spec = spec.copy()
     spec[0] = 0
     spec[harmonics + 1:] = 0
-    fine = np.fft.irfft(spec, n=FINE)
-    rising = np.nonzero((fine <= 0) & (np.roll(fine, -1) > 0))[0]
-    if rising.size == 0:
-        raise ValueError("onda senza passaggi per lo zero")
     k = np.arange(harmonics + 1)
     best, best_score = None, -np.inf
-    for i in rising:
-        a, b = fine[i], fine[(i + 1) % FINE]
-        tau = (i + a / (a - b)) / FINE                       # stima lineare, poi Newton sul segnale
-        for _ in range(6):                                   # a banda limitata: zero esatto
-            ph = spec[:harmonics + 1] * np.exp(2j * np.pi * k * tau) / FINE * 2
-            val, slope = ph[1:].real.sum(), (-(2 * np.pi * k[1:]) * ph[1:].imag).sum()
-            tau -= val / slope
-        tau %= 1.0
-        shifted = spec[:harmonics + 1] * np.exp(2j * np.pi * k * tau)
-        small = np.zeros(waves.FRAME_SAMPLES // 2 + 1, dtype=complex)
-        small[:harmonics + 1] = shifted
-        y = np.fft.irfft(small, n=waves.FRAME_SAMPLES)
-        # primo frame: lo zero piu' vicino all'inizio del ciclo; poi: il piu' simile al precedente
-        score = -min(tau, 1 - tau) if prev is None else float(y @ prev) / (np.linalg.norm(y) + 1e-12)
-        if score > best_score:
-            best, best_score = y, score
+    for sign in ((1.0,) if prev is None else (1.0, -1.0)):
+        sp = sign * spec
+        fine = np.fft.irfft(sp, n=FINE)
+        for i in np.nonzero((fine <= 0) & (np.roll(fine, -1) > 0))[0]:
+            a, b = fine[i], fine[(i + 1) % FINE]
+            tau = (i + a / (a - b)) / FINE                   # stima lineare, poi Newton sul segnale
+            for _ in range(6):                               # a banda limitata: zero esatto
+                ph = sp[:harmonics + 1] * np.exp(2j * np.pi * k * tau) / FINE * 2
+                val, slope = ph[1:].real.sum(), (-(2 * np.pi * k[1:]) * ph[1:].imag).sum()
+                tau -= val / slope
+            tau %= 1.0
+            small = np.zeros(waves.FRAME_SAMPLES // 2 + 1, dtype=complex)
+            small[:harmonics + 1] = sp[:harmonics + 1] * np.exp(2j * np.pi * k * tau)
+            y = np.fft.irfft(small, n=waves.FRAME_SAMPLES)
+            score = -min(tau, 1 - tau) if prev is None else float(y @ prev) / (np.linalg.norm(y) + 1e-12)
+            if score > best_score:
+                best, best_score = y, score
+    if best is None:
+        raise ValueError("onda senza passaggi per lo zero")
     best = best / np.max(np.abs(best))
     best[0] = 0.0
     return best
 
 
+def _low_crest(spec: np.ndarray, harmonics: int, start: np.ndarray | None, iters: int = 150) -> np.ndarray:
+    """Stesse ampiezze armoniche, fasi scelte per un picco basso (meno "spigoli" = piu' energia a
+    parita' di picco, cioe' piu' volume senza distorcere e senza cambiare il timbro).
+
+    Proiezione alternata: si taglia la forma all'80 % del picco e si rimettono le ampiezze giuste,
+    tenendo le fasi. `start` = fasi da cui partire (quelle del frame precedente): passi piccoli fra
+    frame vicini, quindi il morph resta continuo."""
+    n = waves.FRAME_SAMPLES
+    mag = np.abs(spec[:harmonics + 1]) * (n / FINE)
+    mag[0] = 0
+    phase = np.angle(spec[:harmonics + 1]) if start is None else start.copy()
+    full = np.zeros(n // 2 + 1, dtype=complex)
+    for _ in range(iters):
+        full[:harmonics + 1] = mag * np.exp(1j * phase)
+        x = np.fft.irfft(full, n=n)
+        lim = 0.8 * np.max(np.abs(x))
+        phase = np.angle(np.fft.rfft(np.clip(x, -lim, lim))[:harmonics + 1])
+    out = np.zeros(FINE // 2 + 1, dtype=complex)
+    out[:harmonics + 1] = mag * np.exp(1j * phase) * (FINE / n)
+    return out
+
+
 def family(make: Callable[[float], np.ndarray], n: int = waves.FRAMES,
-           harmonics: int = DEFAULT_HARMONICS) -> np.ndarray:
-    """n frame (n, 256) da make(p) -> spettro complesso, p = 0..1."""
+           harmonics: int = DEFAULT_HARMONICS, loud: bool = True) -> np.ndarray:
+    """n frame (n, 256) da make(p) -> spettro complesso, p = 0..1. loud: fasi a picco basso
+    (circa +4 dB a parita' di picco, stesso timbro), partendo ogni volta dal frame precedente."""
     if not 1 <= harmonics <= waves.FRAME_SAMPLES // 2 - 1:
         raise ValueError("harmonics: 1..127")
     frames, prev = [], None
     for p in np.linspace(0.0, 1.0, n):
-        prev = _frame(make(float(p)), harmonics, prev)
+        spec = make(float(p))
+        if not loud:
+            prev = _frame(spec, harmonics, prev)
+        elif prev is None:
+            prev = _frame(_low_crest(spec, harmonics, None), harmonics, None)
+        else:
+            prev = _loudest_continuous(spec, harmonics, prev)
         frames.append(prev)
-    return np.array(frames)
+    return _align_chain(np.array(frames), harmonics)
+
+
+def _start_candidates(frame: np.ndarray, harmonics: int) -> list[np.ndarray]:
+    """Tutte le versioni del frame che partono da uno zero in salita (dritte o capovolte): stesso
+    suono, punto di partenza diverso. Zeri esatti sul segnale a banda limitata (Newton)."""
+    n = waves.FRAME_SAMPLES
+    spec = np.fft.rfft(frame)[:harmonics + 1]
+    spec[0] = 0
+    k = np.arange(harmonics + 1)
+    full = np.zeros(FINE // 2 + 1, dtype=complex)
+    out = []
+    for sign in (1.0, -1.0):
+        sp = sign * spec
+        full[:harmonics + 1] = sp * (FINE / n)
+        fine = np.fft.irfft(full, n=FINE)
+        for i in np.nonzero((fine <= 0) & (np.roll(fine, -1) > 0))[0]:
+            a, b = fine[i], fine[(i + 1) % FINE]
+            tau = (i + a / (a - b)) / FINE
+            for _ in range(6):
+                ph = sp * np.exp(2j * np.pi * k * tau)
+                tau -= ph[1:].real.sum() / (-(2 * np.pi * k[1:]) * ph[1:].imag).sum()
+            small = np.zeros(n // 2 + 1, dtype=complex)
+            small[:harmonics + 1] = sp * np.exp(2j * np.pi * k * (tau % 1.0))
+            y = np.fft.irfft(small, n=n)
+            y /= np.max(np.abs(y))
+            y[0] = 0.0
+            out.append(y)
+    return out
+
+
+def _align_chain(frames: np.ndarray, harmonics: int) -> np.ndarray:
+    """Sceglie insieme il punto di partenza (zero in salita, dritto o capovolto) di tutti i frame,
+    massimizzando la somma delle somiglianze fra vicini (programmazione dinamica): una scelta
+    frame per frame puo' mettere all'angolo i frame successivi."""
+    cands = [_start_candidates(f, harmonics) for f in frames]
+    unit = [np.array([c / np.linalg.norm(c) for c in cs]) for cs in cands]
+    first = unit[0] @ (frames[0] / np.linalg.norm(frames[0]))        # il primo resta com'era (o quasi)
+    score, back = first * 1e-3, []
+    for t in range(1, len(frames)):
+        trans = unit[t - 1] @ unit[t].T                               # (candidati t-1) x (candidati t)
+        total = score[:, None] + trans
+        back.append(np.argmax(total, axis=0))
+        score = np.max(total, axis=0)
+    pick = [int(np.argmax(score))]
+    for b in reversed(back):
+        pick.append(int(b[pick[-1]]))
+    pick.reverse()
+    return np.array([cands[t][i] for t, i in enumerate(pick)])
+
+
+MIN_NEIGHBOUR = 0.75      # somiglianza minima fra frame vicini: a meta' miscela il calo e' < 0.6 dB
+
+
+def _loudest_continuous(spec: np.ndarray, harmonics: int, prev: np.ndarray) -> np.ndarray:
+    """Il frame piu' forte fra varie intensita' di ottimizzazione (partendo dalle fasi del
+    precedente) e il frame con le fasi originali, purche' resti simile al precedente: almeno
+    MIN_NEIGHBOUR, oppure, se nessun candidato ci arriva, quasi quanto il piu' simile."""
+    start = np.angle(np.fft.rfft(prev)[:harmonics + 1])
+    norm_prev = np.linalg.norm(prev)
+
+    def judge(y: np.ndarray) -> tuple[float, float]:
+        return float(y @ prev) / (np.linalg.norm(y) * norm_prev + 1e-12), float(np.sqrt(np.mean(y ** 2)))
+
+    plain = _frame(spec, harmonics, prev)
+    cands = [plain] + [_frame(_low_crest(spec, harmonics, start, it), harmonics, prev) for it in (150, 60, 25, 10, 4, 0)]
+    scored = [(judge(y), y) for y in cands]
+    need = min(MIN_NEIGHBOUR, max(c for (c, _), _ in scored) - 0.05)
+    return max((sc for sc in scored if sc[0][0] >= need - 1e-9), key=lambda sc: sc[0][1])[1]
 
 
 # --- famiglie ----------------------------------------------------------------------------------
@@ -168,17 +268,18 @@ def zones() -> list[tuple[str, int, int]]:
     return out
 
 
-def table(name: str, harmonics: int = DEFAULT_HARMONICS) -> tuple[np.ndarray, list[str]]:
+def table(name: str, harmonics: int = DEFAULT_HARMONICS, loud: bool = True) -> tuple[np.ndarray, list[str]]:
     """(31, 256) frame float e un'etichetta per frame."""
     if name in FAMILIES:
         make = FAMILIES[name][1]
-        return family(make, harmonics=harmonics), [f"{name} p={p:.2f}" for p in np.linspace(0, 1, waves.FRAMES)]
+        return (family(make, harmonics=harmonics, loud=loud),
+                [f"{name} p={p:.2f}" for p in np.linspace(0, 1, waves.FRAMES)])
     if name != "ebm":
         raise KeyError(f"tabella sconosciuta '{name}': {', '.join(TABLES)}")
     frames, labels = [], []
     for fam, n, p0, p1 in EBM_ZONES:
         make = FAMILIES[fam][1]
-        part = family(lambda p, m=make, a=p0, b=p1: m(a + (b - a) * p), n=n, harmonics=harmonics)
+        part = family(lambda p, m=make, a=p0, b=p1: m(a + (b - a) * p), n=n, harmonics=harmonics, loud=loud)
         frames.append(part)
         labels += [f"{fam} p={p0 + (p1 - p0) * p:.2f}" for p in np.linspace(0, 1, n)]
     return np.concatenate(frames), labels

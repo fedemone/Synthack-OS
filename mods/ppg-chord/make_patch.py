@@ -339,6 +339,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--table", choices=[*tables.TABLES, "all"],
                        help="wavetable progettata per synth-pop/EBM (nostra, senza ROM): "
                             + "; ".join(f"{k}: {v}" for k, v in tables.TABLES.items()))
+        p.add_argument("--keep-phase", action="store_true",
+                       help="--table: forme d'onda originali; senza, le fasi sono scelte per un picco basso "
+                            "(stesso timbro, ~+2..+4 dB di volume)")
         p.add_argument("--grit", action="store_true",
                        help="onde PPG lette 'a gradini' come il PPG (immagini fino alla 127a armonica): "
                             "un po' di brillantezza digitale in piu'")
@@ -443,7 +446,7 @@ def resolve_banks(a: argparse.Namespace) -> list[tuple[str, np.ndarray, list[str
         names = list(tables.TABLES) if a.table == "all" else [a.table]
         out = []
         for n in names:
-            frames, labels = tables.table(n, a.harmonics)
+            frames, labels = tables.table(n, a.harmonics, loud=not a.keep_phase)
             out.append((f"table-{n}", waves.bank_q31(frames), labels))
         return out
     a.harmonics = a.harmonics or (127 if a.grit else 40)
