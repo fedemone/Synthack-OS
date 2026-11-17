@@ -535,9 +535,11 @@ def test_loud_tables_keep_spectrum_and_are_never_quieter(name):
 
 
 def test_loud_tables_are_louder_where_it_matters():
-    for name in ("reso", "vowel", "sync", "ebm"):
+    for name in ("reso", "vowel", "sync"):
         gain = _rms_db(tables.table(name)[0]) - _rms_db(tables.table(name, loud=False)[0])
         assert np.median(gain) >= 2.0, (name, np.median(gain))
+    # ebm: le zone spianate sono gia' meno "a punta"; conta il livello assoluto (prima -7 dBFS)
+    assert np.median(_rms_db(tables.table("ebm")[0])) >= -3.5
 
 
 @pytest.mark.parametrize("name", list(tables.TABLES))
