@@ -13,10 +13,18 @@ scorre la famiglia con continuita'.
 - metal  FM 1:3, indice 0 -> 6: campane e metalli digitali
 - ebm    zone di 5-7 frame da reso, pwm, vowel, sync, metal: molta varieta' in un solo banco
 
-Tutto e' generato qui (nessun dato di terzi). Ogni frame: spettro limitato a `harmonics` armoniche,
-ruotato su un passaggio per lo zero in salita (y[0] = 0, come i frame stock); fra i passaggi
-possibili si sceglie quello piu' simile al frame precedente, cosi' frame vicini restano in fase e
-l'interpolazione di SY CHORD fra frame non si svuota.
+Tutto e' generato qui (nessun dato di terzi). Passi per ogni famiglia (family()):
+
+1. spettro della forma per ogni p, limitato a `harmonics` armoniche;
+2. volume (loud=True): stesse ampiezze armoniche, fasi scelte per un picco basso (_low_crest),
+   partendo dalle fasi del frame precedente e restando simili a lui (_loudest_continuous):
+   stesso timbro, ~+2..+4 dB a parita' di picco, morph continuo;
+3. ogni frame parte da uno zero in salita (y[0] = 0, come i frame stock); il punto di partenza di
+   tutti i frame (dritti o capovolti) e' scelto insieme (_align_chain) per la massima somiglianza
+   fra vicini: l'interpolazione di SY CHORD fra frame non si svuota.
+
+Nel banco ebm le zone reso, sync e metal passano anche da deformant(): le "gobbe" dello spettro
+che si muovono con WAVE suonavano come vocali; restano solo nella zona vowel.
 """
 
 from __future__ import annotations

@@ -1,22 +1,28 @@
-"""ppg-chord: una wavetable PPG nel banco di SY CHORD. Girare WAVE la scorre come sul PPG.
+"""ppg-chord: wavetable "stile PPG" nel banco di SY CHORD (Syntakt OS 1.41).
 
-SY CHORD ha un banco di 32 frame: WAVE 0 = seno condiviso (non lo tocchiamo), WAVE 4, 8 ... 124 =
-frame 1..31, e i valori in mezzo sono interpolati dalla machine (docs/audio-path.md). Una wavetable
-PPG ha 61 posizioni: le 31 pari (0, 2 ... 60) riempiono esattamente i 31 frame.
+SY CHORD legge un banco di 32 frame: WAVE 0 = seno condiviso con altre machine (non lo tocchiamo),
+WAVE 4, 8 ... 124 = frame 1..31; i valori in mezzo sono interpolati dalla machine. Questa mod
+riscrive i 31 frame (docs/audio-path.md). Girare WAVE, o un LFO su WAVE, scorre la tabella come
+sul PPG Wave.
 
-    python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c   # tutte le onde e tabelle
-    python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --ppg-table 5
-    python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-table 5
-    python mods/ppg-chord/make_patch.py build   --designed                 # senza ROM: le 7 onde nostre
-    python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --curated   # 31 onde scelte
-    python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-waves 12,40,77 --fill-max
+Sorgenti del banco (una per patch):
+    --table NOME     tabelle progettate per synth-pop/EBM (tables.py); "ebm" e' il predefinito
+    --ppg-table T    una wavetable della ROM PPG (posizioni 0, 2 ... 60 = 31 frame)
+    --curated        31 onde ROM scelte: dense, con corpo, non forme di base
+    --ppg-waves L    31 onde ROM scelte a mano (--fill-max completa con onde di MAX)
+    --designed       le 7 onde progettate in waves.py, interpolate
+
+Comandi:
+    python mods/ppg-chord/make_patch.py build   --table ebm             # scrive patch.json
+    python mods/ppg-chord/make_patch.py preview --table all --ebm       # ascolto in WAV, senza firmware
+    python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c   # pagina con tutte le onde
+    python mods/ppg-chord/make_patch.py check   out/max-ebm.syx         # quale banco c'e' in un .syx
 
 La patch scrive la stessa regione del banco "sy-chord" di MAX (0x40016B80, 31868 B): le due mod
-si escludono (il build rifiuta le sovrapposizioni). Le immagini delle onde sullo schermo NON
-vengono ridisegnate: mostrano ancora le forme stock.
+si escludono. Le immagini delle onde sullo schermo non vengono ridisegnate (restano quelle stock).
 
 --ppg-rom legge una copia LOCALE dei dati di wave-stuff (data/ppg_data.c): tienila in local/
-(git-ignored). Una patch.json fatta cosi' contiene dati derivati da quella ROM.
+(git-ignored). Una patch.json fatta da quei dati contiene dati derivati dalla ROM PPG.
 """
 
 from __future__ import annotations
@@ -313,7 +319,8 @@ def pick_source(a: argparse.Namespace) -> list[tuple[str, list[np.ndarray]]]:
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Riga di comando: list, check, catalog, preview, build."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="onde progettate (per la ROM PPG: catalog)")
@@ -376,8 +383,11 @@ def main(argv: list[str] | None = None) -> int:
     src_args(b)
     b.add_argument("--stock", type=Path, default=STOCK, help="se presente, verifica il banco stock")
     b.add_argument("--emu", action="store_true", help="anche SY CHORD nell'emulatore, stock e banco nuovo")
-    a = ap.parse_args(argv)
+    return ap
 
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
     if a.cmd == "list":
         for name, (desc, _) in waves.SPECTRA.items():
             print(f"  {name:8s} {desc}")
@@ -391,23 +401,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{a.out}: {n['designed']} onde progettate, {n['rom']} onde ROM, {n['tables']} wavetable"
               f"{'' if a.ppg_rom else ' (senza --ppg-rom: solo le progettate)'}")
         return 0
-
     if (a.curated or a.ppg_waves) and not a.ppg_rom:
         raise SystemExit("--curated / --ppg-waves richiedono --ppg-rom")
     banks = resolve_banks(a)
-    if a.cmd == "preview":
-        for name, q, labels in banks:
-            if a.ebm:
-                path = a.out / f"{name}_ebm.wav"
-                write_wav(path, render_sequence(q, a.ebm_wave, a.ebm_depth))
-                print(f"  {name}: basso EBM, WAVE {a.ebm_wave:g} -> {a.ebm_wave + a.ebm_depth:g} per nota -> {path}")
-                continue
-            lo, hi = (a.hold, a.hold) if a.hold is not None else (4, 124)
-            path = a.out / f"{name}_{a.chord}{'' if a.hold is None else f'_w{a.hold:g}'}.wav"
-            write_wav(path, render(q, lo, hi, a.seconds, a.root, a.chord))
-            print(f"  {name}: WAVE {lo:g}->{hi:g} -> {path}")
-        return 0
+    return cmd_preview(a, banks) if a.cmd == "preview" else cmd_build(a, banks)
 
+
+def cmd_preview(a: argparse.Namespace, banks: list[tuple[str, np.ndarray, list[str]]]) -> int:
+    """Un WAV per banco: accordo che scorre WAVE (o fermo con --hold), oppure basso EBM (--ebm)."""
+    for name, q, _ in banks:
+        if a.ebm:
+            path = a.out / f"{name}_ebm.wav"
+            write_wav(path, render_sequence(q, a.ebm_wave, a.ebm_depth))
+            print(f"  {name}: basso EBM, WAVE {a.ebm_wave:g} -> {a.ebm_wave + a.ebm_depth:g} per nota -> {path}")
+            continue
+        lo, hi = (a.hold, a.hold) if a.hold is not None else (4, 124)
+        path = a.out / f"{name}_{a.chord}{'' if a.hold is None else f'_w{a.hold:g}'}.wav"
+        write_wav(path, render(q, lo, hi, a.seconds, a.root, a.chord))
+        print(f"  {name}: WAVE {lo:g}->{hi:g} -> {path}")
+    return 0
+
+
+def cmd_build(a: argparse.Namespace, banks: list[tuple[str, np.ndarray, list[str]]]) -> int:
+    """Scrive patch.json. Con l'OS stock presente verifica subito il banco stock (altrimenti lo fa
+    tools/build/build.py con l'impronta); con --emu fa suonare SY CHORD nel motore originale."""
     if len(banks) != 1:
         raise SystemExit("build: una sola sorgente")
     name, q, labels = banks[0]
@@ -421,10 +438,10 @@ def main(argv: list[str] | None = None) -> int:
     spec = build_spec(q, name, a.harmonics, labels)
     (HERE / "patch.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     print(f"patch.json: {name} -> WAVE 4..124 ({BANK_LEN} B a {BANK_ADDR:#x}); WAVE 0 e schermo invariati")
-    if a.table == "ebm":
+    if a.table == "ebm":                                   # zone del banco ebm
         for fam, lo, hi in tables.zones():
             print(f"  WAVE {lo:3d}-{hi:3d}: {fam}")
-    elif not a.table and labels and not labels[0].startswith("posizione"):
+    elif not a.table and labels and not labels[0].startswith("posizione"):   # banco curato o lista
         for k, label in enumerate(labels, 1):
             print(f"  WAVE {4 * k:3d}: {label}")
     print(body_report(q))
@@ -455,6 +472,7 @@ def resolve_banks(a: argparse.Namespace) -> list[tuple[str, np.ndarray, list[str
     labels = [f"posizione {p}" for p in waves.TABLE_POSITIONS]
     return [(name + ("-grit" if a.grit else ""), make_bank(cycles, a.harmonics, a.grit), labels)
             for name, cycles in pick_source(a)]
+
 
 if __name__ == "__main__":
     sys.exit(main())

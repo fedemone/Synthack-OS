@@ -6,6 +6,99 @@ Unofficial community mod bundle for **Elektron Syntakt OS 1.41**, built locally 
 
 **Release preparation:** local draft only; no release has been published by this run. See [release notes](tools/max/release_1_0/RELEASE_NOTES.md), [installation](tools/max/release_1_0/INSTALL.md), [attribution](tools/max/release_1_0/ATTRIBUTION.md), and [release validation](tools/max/release_1_0/REVIEW.md). Windows 11 x64 is the tested builder platform. Read [recovery guidance](RECOVERY.md) before installing modified firmware.
 
+## This fork: MAX + PPG-style wavetables for SY CHORD
+
+This fork builds the MAX feature set with **[`mods/ppg-chord`](mods/ppg-chord) in place of MAX's SY CHORD wave bank**. SY CHORD's WAVE 4 … 124 then scan PPG-style wavetables. The default bank, `ebm`, has zones of resonant saw, PWM, vowels, sync and FM metal for synth-pop / EBM; PPG ROM tables and curated PPG waves are options. WAVE 0, the screen pictures and every other machine are unchanged.
+
+**Hardware:** verified on a Syntakt (OS 1.41) with MAX + FM4 + `ppg-chord` (`ebm` bank): it boots, the waves sweep, envelopes and level are normal. The build is reproducible: the same inputs give the same SHA-256.
+
+## Build and install (this fork)
+
+Linux or WSL. Nothing here talks to the Syntakt; you flash the resulting file yourself with Elektron Transfer.
+
+### 1. One-time setup
+
+```sh
+git clone https://github.com/fedemone/Synthack-OS.git && cd Synthack-OS
+git checkout claude/funny-lovelace-otvta4          # the branch of this fork (PR #1)
+bash tools/unpack/setup_eft.sh                       # builds elektron-firmware-tool in third_party/
+git config core.hooksPath tools/hooks                # blocks firmware files from commits
+pip install numpy                                    # only to regenerate banks (make_patch.py)
+```
+
+Put your official **Syntakt OS 1.41** from elektron.se at `firmware/Syntakt_OS1.41.syx` (git-ignored) and check it:
+
+```sh
+sha256sum firmware/Syntakt_OS1.41.syx   # 8e2488f462c4a5656396a895f113bcd415e9900fa8709340dccf45d4cb9ed19e
+```
+
+### 2. Choose the SY CHORD bank (optional)
+
+The committed `mods/ppg-chord/patch.json` is the `ebm` bank, which is ready to build. To use another bank, regenerate it first; see [mods/ppg-chord](mods/ppg-chord#banks). For example:
+
+```sh
+python3 mods/ppg-chord/make_patch.py preview --table all --ebm    # listen: WAVs in out/ppg-chord/preview
+python3 mods/ppg-chord/make_patch.py build --table vowel          # or --ppg-rom local/ppg_data.c --ppg-table 7
+```
+
+### 3. Build
+
+```sh
+python3 tools/build/build.py --stock firmware/Syntakt_OS1.41.syx \
+    max:splash max:dual-mono max:modarea max:vparams max:master-comp max:readable-values \
+    max:beat-repeat max:fx3 max:deja-vu max:fm4 mods/ppg-chord -o out/synthack-ppg.syx
+```
+
+- `max:<name>` takes a feature from MAX's manifest. Drop the ones you don't want, for example `max:fm4` for SY FM4.
+- The build refuses a wrong stock OS, overlapping or conflicting mods (`ppg-chord` with `max:sy-chord`), and an unsafe boot margin. It overwrites the output file.
+
+### 4. Verify the file before flashing
+
+```sh
+python3 tools/unpack/eft.py info out/synthack-ppg.syx              # Syntakt, version 1.41, checksums : ok
+python3 mods/ppg-chord/make_patch.py check out/synthack-ppg.syx    # which SY CHORD bank is inside
+sha256sum out/synthack-ppg.syx
+```
+
+With the default `ebm` bank and the mod list above, the SHA-256 is `64e84f9ace79b273a0225f17d08e4571a96640df6d30e1cde2b4ef2b2784feb5`.
+
+### 5. Flash
+
+1. Back up your projects and sounds. Keep the official OS file at hand.
+2. Send `out/synthack-ppg.syx` with Elektron Transfer using the **OS update** flow.
+3. **Accept the confirmation prompt on the Syntakt.** Do not interrupt power until the update has finished and the device has restarted. If there is no prompt, the update did not happen and the old OS is still there.
+
+### 6. Check on the device
+
+On SY CHORD, use one note, an open filter and nothing modulating WAVE, and compare **WAVE 52** with **WAVE 0** (always the stock sine):
+- with the `ebm` bank, WAVE 52 is a thin, buzzy pulse;
+- a sine means the stock bank is still installed;
+- an organ means MAX's own bank is installed.
+
+More in [mods/ppg-chord](mods/ppg-chord#playing-it).
+
+### Updating later
+
+```sh
+git checkout -- mods/ppg-chord/patch.json    # only if you regenerated it locally
+git pull
+```
+
+Then repeat steps 2–6. Your projects and sounds stay on the device; sounds that use a changed WAVE value will sound different.
+
+### Back to stock or recovery
+
+Flash the official `Syntakt_OS1.41.syx` the same way. If the device does not boot, follow [RECOVERY.md](RECOVERY.md): STARTUP menu (hold FUNC at power-on), OS UPGRADE, then send the file over DIN MIDI.
+
+### Tests (optional)
+
+```sh
+pip install pytest unicorn
+python3 -m pytest -q tests/test_ppg_chord.py tests/test_build.py
+```
+
+With the stock OS in `firmware/`, the tests also play SY CHORD's bank in the original sound engine (emulator).
+
 ## Included in MAX 1.0
 
 | Included feature | What it does | Origin |
@@ -21,12 +114,6 @@ Unofficial community mod bundle for **Elektron Syntakt OS 1.41**, built locally 
 | Heap modarea and vparams | Reserves 64 KiB of the OS heap for mod code and provides shared kit-parameter dispatch. Infrastructure supporting the musical mods. | Angelo-politek / SyntHack |
 
 The exact 31-wave list is in the release notes. MAX is a fixed build, not the Workbench wave editor. Existing sounds using replaced waves will change timbre. **SY FM4 is not included**: it remains separate development, with unresolved complete page-2 editing and no unified hardware-tested build.
-
-## PPG wavetable for SY CHORD (this fork)
-
-[`mods/ppg-chord`](mods/ppg-chord) puts **PPG-style wavetables** into SY CHORD's 31-frame bank: turning WAVE 4 → 124 scans the table, like a PPG Wave. The default is our **`ebm`** bank: zones of resonant saw, PWM, vowels, sync and FM metal for synth-pop / EBM. Other designed tables and PPG ROM tables are available too. It **replaces** the 31-wave bank above, since both write the same region. Screen pictures stay stock and WAVE 0 is unchanged. Choose one of the 29 tables from your local copy of [wave-stuff](https://github.com/Jacajack/wave-stuff)'s data, or use our 7 designed waves. Browse and hear every table first with the local catalog page.
-
-Build with `tools/build/build.py`, where MAX features are available as `max:<name>`, or add `mods/ppg-chord/patch.json` as a *Local patch* in the modular builder with *SY CHORD Wave Bank* unticked. Details: [mods/ppg-chord](mods/ppg-chord).
 
 ## Credits and source
 
