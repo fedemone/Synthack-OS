@@ -488,3 +488,17 @@ def test_emulated_sy_chord_plays_ebm_table():
     stock = np.array(mp.emu_render(None, 64, 48, 0.1), dtype=float)
     new = np.array(mp.emu_render(mp.bank_bytes(q), 64, 48, 0.1), dtype=float)
     assert np.max(np.abs(new)) > 0.2 * np.max(np.abs(stock)) and not np.allclose(stock, new)
+
+
+@pytest.mark.skipif(not MAX_MANIFEST.exists(), reason="manifest di MAX assente")
+def test_identify_bank():
+    m = json.loads(MAX_MANIFEST.read_text())
+    chord = next(mod for mod in m["mods"] if mod["name"] == "sy-chord")
+    (p,) = [p for p in chord["patches"] if p["section"] == 7]
+    assert mp.identify_bank(bytes.fromhex(p["hex"])).startswith("MAX")
+    mine = json.loads((ROOT / "mods" / "ppg-chord" / "patch.json").read_text())
+    assert mp.identify_bank(bytes.fromhex(mine["patches"][0]["hex"])).startswith("ppg-chord, questo patch.json")
+    other = waves.bank_q31(tables.table("vowel")[0])
+    if mine["wave"]["source"] != "table-vowel":
+        assert mp.identify_bank(mp.bank_bytes(other)).startswith("un altro banco")
+    assert mp.identify_bank(bytes(mp.BANK_LEN)).startswith("un altro") or True

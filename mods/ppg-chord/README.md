@@ -85,6 +85,18 @@ Also check the amp envelope (decay/sustain) and the filter envelope of the sound
 
 `build` prints the body of the bank it writes, next to stock (0.96) and MAX (0.76).
 
+## Is the new bank on the device?
+
+Set **WAVE = 52** on SY CHORD and compare it with **WAVE = 0**, which is always the stock sine. Use one note (unison), filter open, and nothing modulating WAVE:
+
+| Bank on the device | WAVE 52 sounds like | WAVE 124 |
+|---|---|---|
+| stock | a pure sine, almost the same as WAVE 0 | sine-like |
+| MAX | Organ 1-2-4 | a major-9 chord in one note |
+| ppg-chord `ebm` | a thin, buzzy ~10 % pulse | metallic FM |
+
+To see which bank a `.syx` file contains: `python3 mods/ppg-chord/make_patch.py check out/max-ebm.syx`.
+
 ## Use
 
 ```sh

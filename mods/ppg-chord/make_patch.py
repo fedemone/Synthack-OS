@@ -205,6 +205,36 @@ def body_report(q31: np.ndarray) -> str:
             f"(stock 0.96, MAX 0.76){note}")
 
 
+def identify_bank(region: bytes) -> str:
+    """Nome del banco nei 31868 byte della regione: stock, MAX, questo patch.json o altro."""
+    if sha(region) == BANK_STOCK_SHA256:
+        return "stock (Elektron): WAVE 52 e' quasi un seno puro"
+    if MAX_MANIFEST.exists():
+        m = json.loads(MAX_MANIFEST.read_text(encoding="utf-8"))
+        chord = next((mod for mod in m["mods"] if mod["name"] == "sy-chord"), None)
+        if chord and any(p["section"] == 7 and bytes.fromhex(p["hex"]) == region for p in chord["patches"]):
+            return "MAX (31-wave SY CHORD bank): WAVE 52 = Organ 1-2-4, WAVE 124 = Major 9 chord"
+    mine = HERE / "patch.json"
+    if mine.exists():
+        spec = json.loads(mine.read_text(encoding="utf-8"))
+        if bytes.fromhex(spec["patches"][0]["hex"]) == region:
+            f = spec["wave"]["frames"]
+            return f"ppg-chord, questo patch.json ({spec['wave']['source']}): WAVE 52 = {f['52']}, WAVE 124 = {f['124']}"
+    q = read_bank(region)
+    ok = (q[:, 0] == 0).all() and (q[:, 256] == 0).all()
+    return ("un altro banco ppg-chord/Workbench (non questo patch.json)" if ok
+            else "sconosciuto: i frame non hanno il formato atteso")
+
+
+def check_syx(path: Path) -> str:
+    import eft
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="ppg-check-") as tmp:
+        sec7 = eft.unpack(Path(path), Path(tmp), ids=[7])[7].read_bytes()
+    o = BANK_ADDR - LOAD
+    return f"{path}: banco SY CHORD = {identify_bank(sec7[o:o + BANK_LEN])}"
+
+
 # ------------------------------------------------------------------ banco curato
 
 def max_frames(threshold: float = 0.95, basic: bool = False) -> list[tuple[str, np.ndarray]]:
@@ -287,6 +317,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list", help="onde progettate (per la ROM PPG: catalog)")
+    k = sub.add_parser("check", help="quale banco SY CHORD contiene un .syx (stock, MAX, questo patch.json, altro)")
+    k.add_argument("syx", type=Path)
     c = sub.add_parser("catalog", help="pagina HTML locale con tutte le onde e le wavetable")
     c.add_argument("--ppg-rom", type=Path, help="copia locale di wave-stuff/data/ppg_data.c")
     c.add_argument("-o", "--out", type=Path, default=OUT / "catalog.html")
@@ -346,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "list":
         for name, (desc, _) in waves.SPECTRA.items():
             print(f"  {name:8s} {desc}")
+        return 0
+    if a.cmd == "check":
+        print(check_syx(a.syx))
         return 0
     if a.cmd == "catalog":
         import catalog
