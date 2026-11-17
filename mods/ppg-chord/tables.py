@@ -1,0 +1,184 @@
+"""Wavetable progettate per synth-pop / EBM anni '80, 31 frame ciascuna, nel formato del banco.
+
+Ogni tabella e' una famiglia d'onde con un parametro p che va da 0 a 1 lungo i 31 frame (WAVE 4 ->
+124): girare WAVE (o un LFO in modalita' ONE su WAVE, come l'inviluppo sulla wavetable del PPG)
+scorre la famiglia con continuita'.
+
+- reso   dente di sega in un passa-basso risonante che si apre: bassi e lead EBM, lo "sweep" PPG
+- pwm    impulso dal 50 % al 5 %: pad e bassi a modulazione d'ampiezza d'impulso
+- vowel  vocali A E I O U (formanti): cori digitali, ottimo con l'unisono di SY CHORD
+- sync   hard sync, rapporto 1 -> 8, piu' il master: lead aggressivi
+- fold   wavefolder, guadagno 1 -> 12: digitale e ruvido
+- brass  FM 1:1, indice 0 -> 7: ottoni digitali che si aprono
+- metal  FM 1:3, indice 0 -> 6: campane e metalli digitali
+- ebm    zone di 5-7 frame da reso, pwm, vowel, sync, metal: molta varieta' in un solo banco
+
+Tutto e' generato qui (nessun dato di terzi). Ogni frame: spettro limitato a `harmonics` armoniche,
+ruotato su un passaggio per lo zero in salita (y[0] = 0, come i frame stock); fra i passaggi
+possibili si sceglie quello piu' simile al frame precedente, cosi' frame vicini restano in fase e
+l'interpolazione di SY CHORD fra frame non si svuota.
+"""
+
+from __future__ import annotations
+
+from typing import Callable
+
+import numpy as np
+
+import waves
+
+FINE = 8192                         # campioni per ciclo per generare le forme nel tempo
+DEFAULT_HARMONICS = 64              # piu' brillante delle onde PPG (40); 1..127
+
+
+def _saw_spectrum(h: np.ndarray) -> np.ndarray:
+    return 1.0 / h
+
+
+def _from_time(fn: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
+    """Spettro complesso (indici 0..FINE/2) di una forma definita nel tempo su un ciclo."""
+    t = np.arange(FINE) / FINE
+    return np.fft.rfft(fn(t))
+
+
+def _from_sine_series(b: np.ndarray) -> np.ndarray:
+    """Spettro complesso di sum_h b[h-1] sin(2 pi h t): dispari attorno a 0, passa per 0 a t = 0."""
+    spec = np.zeros(FINE // 2 + 1, dtype=complex)
+    spec[1:b.size + 1] = -0.5j * FINE * b
+    return spec
+
+
+def _frame(spec: np.ndarray, harmonics: int, prev: np.ndarray | None) -> np.ndarray:
+    """Spettro -> frame di 256 campioni: banda limitata, partenza su uno zero in salita, picco 1."""
+    spec = spec.copy()
+    spec[0] = 0
+    spec[harmonics + 1:] = 0
+    fine = np.fft.irfft(spec, n=FINE)
+    rising = np.nonzero((fine <= 0) & (np.roll(fine, -1) > 0))[0]
+    if rising.size == 0:
+        raise ValueError("onda senza passaggi per lo zero")
+    k = np.arange(harmonics + 1)
+    best, best_score = None, -np.inf
+    for i in rising:
+        a, b = fine[i], fine[(i + 1) % FINE]
+        tau = (i + a / (a - b)) / FINE                       # stima lineare, poi Newton sul segnale
+        for _ in range(6):                                   # a banda limitata: zero esatto
+            ph = spec[:harmonics + 1] * np.exp(2j * np.pi * k * tau) / FINE * 2
+            val, slope = ph[1:].real.sum(), (-(2 * np.pi * k[1:]) * ph[1:].imag).sum()
+            tau -= val / slope
+        tau %= 1.0
+        shifted = spec[:harmonics + 1] * np.exp(2j * np.pi * k * tau)
+        small = np.zeros(waves.FRAME_SAMPLES // 2 + 1, dtype=complex)
+        small[:harmonics + 1] = shifted
+        y = np.fft.irfft(small, n=waves.FRAME_SAMPLES)
+        # primo frame: lo zero piu' vicino all'inizio del ciclo; poi: il piu' simile al precedente
+        score = -min(tau, 1 - tau) if prev is None else float(y @ prev) / (np.linalg.norm(y) + 1e-12)
+        if score > best_score:
+            best, best_score = y, score
+    best = best / np.max(np.abs(best))
+    best[0] = 0.0
+    return best
+
+
+def family(make: Callable[[float], np.ndarray], n: int = waves.FRAMES,
+           harmonics: int = DEFAULT_HARMONICS) -> np.ndarray:
+    """n frame (n, 256) da make(p) -> spettro complesso, p = 0..1."""
+    if not 1 <= harmonics <= waves.FRAME_SAMPLES // 2 - 1:
+        raise ValueError("harmonics: 1..127")
+    frames, prev = [], None
+    for p in np.linspace(0.0, 1.0, n):
+        prev = _frame(make(float(p)), harmonics, prev)
+        frames.append(prev)
+    return np.array(frames)
+
+
+# --- famiglie ----------------------------------------------------------------------------------
+
+def _reso(p: float) -> np.ndarray:
+    h = np.arange(1, FINE // 2 + 1)
+    fc = 1.5 * (48 / 1.5) ** p                              # taglio: dalla 1.5a alla 48a armonica
+    q = 5.0
+    resp = 1 / np.sqrt((1 - (h / fc) ** 2) ** 2 + (h / (fc * q)) ** 2) / (1 + (h / fc) ** 2)   # 4 poli circa
+    return _from_sine_series(_saw_spectrum(h) * resp)
+
+
+def _pwm(p: float) -> np.ndarray:
+    w = 0.5 - 0.45 * p                                       # larghezza 50 % -> 5 %
+    return _from_time(lambda t: np.where(t < w, 1.0, -1.0))
+
+
+# formanti delle vocali, in Hz (valori medi da letteratura fonetica), per una fondamentale di ~130 Hz
+_VOWELS = {"A": (730, 1090, 2440), "E": (530, 1840, 2480), "I": (270, 2290, 3010),
+           "O": (570, 840, 2410), "U": (300, 870, 2240)}
+_F0 = 130.0
+
+
+def _vowel(p: float) -> np.ndarray:
+    seq = ["A", "E", "I", "O", "U"]
+    x = p * (len(seq) - 1)
+    j = min(int(x), len(seq) - 2)
+    t = x - j
+    f = [(1 - t) * a + t * b for a, b in zip(_VOWELS[seq[j]], _VOWELS[seq[j + 1]])]
+    h = np.arange(1, FINE // 2 + 1)
+    hz = h * _F0
+    env = sum(g * np.exp(-0.5 * ((hz - fk) / bw) ** 2) for fk, g, bw in zip(f, (1.0, 0.7, 0.35), (90, 120, 160)))
+    return _from_sine_series(h ** -0.7 * (0.06 + env))
+
+
+def _sync(p: float) -> np.ndarray:
+    r = 1.0 + 7.0 * p                                        # rapporto slave/master 1 -> 8
+    # piu' un po' del dente di sega "master", come un lead sync classico: la fondamentale resta
+    return _from_time(lambda t: 2.0 * ((t * r) % 1.0) - 1.0 + 0.45 * (2.0 * t - 1.0))
+
+
+def _fold(p: float) -> np.ndarray:
+    g = 1.0 + 11.0 * p
+    return _from_time(lambda t: np.sin(g * np.sin(2 * np.pi * t)))
+
+
+def _fm(ratio: int, top: float) -> Callable[[float], np.ndarray]:
+    return lambda p: _from_time(lambda t: np.sin(2 * np.pi * t + top * p * np.sin(2 * np.pi * ratio * t)))
+
+
+FAMILIES: dict[str, tuple[str, Callable[[float], np.ndarray]]] = {
+    "reso": ("dente di sega in un passa-basso risonante che si apre (bassi e lead EBM)", _reso),
+    "pwm": ("impulso 50 % -> 5 % (pad e bassi PWM)", _pwm),
+    "vowel": ("vocali A E I O U (cori digitali; bene con l'unisono)", _vowel),
+    "sync": ("hard sync, rapporto 1 -> 8, piu' il master (lead aggressivi)", _sync),
+    "fold": ("wavefolder, guadagno 1 -> 12 (digitale, ruvido)", _fold),
+    "brass": ("FM 1:1, indice 0 -> 7 (ottoni digitali che si aprono)", _fm(1, 7.0)),
+    "metal": ("FM 1:3, indice 0 -> 6 (campane, metalli)", _fm(3, 6.0)),
+}
+
+# banco misto: (famiglia, frame, p iniziale, p finale)
+EBM_ZONES = [("reso", 7, 0.05, 0.85), ("pwm", 6, 0.0, 0.9), ("vowel", 7, 0.0, 1.0),
+             ("sync", 6, 0.1, 0.8), ("metal", 5, 0.15, 0.8)]
+assert sum(n for _, n, _, _ in EBM_ZONES) == waves.FRAMES
+
+TABLES = {**{k: d for k, (d, _) in FAMILIES.items()},
+          "ebm": "zone: reso (WAVE 4-28), pwm (32-52), vowel (56-80), sync (84-104), metal (108-124)"}
+
+
+def zones() -> list[tuple[str, int, int]]:
+    """Banco ebm: (famiglia, primo WAVE, ultimo WAVE) per zona."""
+    out, k = [], 1
+    for name, n, _, _ in EBM_ZONES:
+        out.append((name, 4 * k, 4 * (k + n - 1)))
+        k += n
+    return out
+
+
+def table(name: str, harmonics: int = DEFAULT_HARMONICS) -> tuple[np.ndarray, list[str]]:
+    """(31, 256) frame float e un'etichetta per frame."""
+    if name in FAMILIES:
+        make = FAMILIES[name][1]
+        return family(make, harmonics=harmonics), [f"{name} p={p:.2f}" for p in np.linspace(0, 1, waves.FRAMES)]
+    if name != "ebm":
+        raise KeyError(f"tabella sconosciuta '{name}': {', '.join(TABLES)}")
+    frames, labels = [], []
+    for fam, n, p0, p1 in EBM_ZONES:
+        make = FAMILIES[fam][1]
+        part = family(lambda p, m=make, a=p0, b=p1: m(a + (b - a) * p), n=n, harmonics=harmonics)
+        frames.append(part)
+        labels += [f"{fam} p={p0 + (p1 - p0) * p:.2f}" for p in np.linspace(0, 1, n)]
+    return np.concatenate(frames), labels

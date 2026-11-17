@@ -208,7 +208,18 @@ TABLE_POSITIONS = list(range(0, SLOTS, 2))  # 0, 2 ... 60: 31 posizioni = 31 fra
 assert len(TABLE_POSITIONS) == FRAMES
 
 
-def condition(cycle: np.ndarray, harmonics: int = 40) -> np.ndarray:
+def _zoh_spectrum(cycle: np.ndarray, harmonics: int) -> np.ndarray:
+    """Armoniche 1..harmonics del ciclo PPG letto "a gradini" (ogni campione tenuto per tutta la sua
+    cella, come un lettore a 8 bit senza interpolazione): oltre la 63a compaiono le immagini
+    (128 - h, 128 + h ...) attenuate dal sinc. E' la "sparkle" digitale del PPG."""
+    c = np.asarray(cycle, dtype=np.float64)
+    h = np.arange(1, harmonics + 1)
+    n = np.arange(CYCLE) + 0.5                               # centro di ogni cella
+    spec = np.exp(-2j * np.pi * np.outer(h, n) / CYCLE) @ c / CYCLE
+    return spec * np.sinc(h / CYCLE)
+
+
+def condition(cycle: np.ndarray, harmonics: int = 40, grit: bool = False) -> np.ndarray:
     """Ciclo PPG (128) -> frame di 256 campioni: banda limitata, ruotato di mezzo ciclo, picco 1.
 
     Le onde PPG sono dispari attorno a meta' ciclo (x[n] = -x[127-n] - 1): la versione a banda
@@ -216,8 +227,21 @@ def condition(cycle: np.ndarray, harmonics: int = 40) -> np.ndarray:
     0 (come vuole il formato, y[0] = 0) e tutti i frame hanno la stessa fase: SY CHORD interpola fra
     frame vicini senza cancellazioni.
     """
+    if grit:
+        # a gradini: le celle sono [n, n+1) e la simmetria e' esattamente a meta' ciclo (cella 64)
+        if not 1 <= harmonics <= FRAME_SAMPLES // 2 - 1:
+            raise ValueError(f"harmonics con grit: 1..{FRAME_SAMPLES // 2 - 1}")
+        spec = _zoh_spectrum(cycle, harmonics) * (-1.0) ** np.arange(1, harmonics + 1)   # mezzo ciclo
+        big = np.zeros(FRAME_SAMPLES // 2 + 1, dtype=complex)
+        big[1:harmonics + 1] = spec * FRAME_SAMPLES
+        y = np.fft.irfft(big, n=FRAME_SAMPLES)
+        peak = np.max(np.abs(y))
+        if peak < 1e-9:
+            raise ValueError("onda vuota")
+        return y / peak
     if not 1 <= harmonics <= HALF - 1:
-        raise ValueError(f"harmonics: 1..{HALF - 1} (le onde PPG non hanno armoniche oltre la 63a)")
+        raise ValueError(f"harmonics: 1..{HALF - 1} (le onde PPG non hanno armoniche oltre la 63a; "
+                         "con --grit fino a 127)")
     spec = np.fft.rfft(np.asarray(cycle, dtype=np.float64))
     spec[0] = 0
     spec[harmonics + 1:] = 0
@@ -232,12 +256,12 @@ def condition(cycle: np.ndarray, harmonics: int = 40) -> np.ndarray:
     return y / peak
 
 
-def bank(cycles: list[np.ndarray], harmonics: int = 40) -> np.ndarray:
+def bank(cycles: list[np.ndarray], harmonics: int = 40, grit: bool = False) -> np.ndarray:
     """31 cicli PPG -> (31, 256) float. Una sola polarita' per tutto il banco: in salita da 0
     (pendenza media positiva), come i frame stock; invertire tutto il banco non si sente."""
     if len(cycles) != FRAMES:
         raise ValueError(f"servono {FRAMES} cicli, non {len(cycles)}")
-    frames = np.array([condition(c, harmonics) for c in cycles])
+    frames = np.array([condition(c, harmonics, grit) for c in cycles])
     if np.sum(frames[:, 1] - frames[:, -1]) < 0:
         frames = -frames
     frames[:, 0] = 0.0
@@ -324,8 +348,17 @@ def body(cycle: np.ndarray, n: int = 3) -> float:
     return float(e[:n].sum() / (e.sum() or 1))
 
 
-def candidates(rom: np.ndarray, threshold: float = 0.95, min_body: float = 0.0) -> list[int]:
-    """Indici delle onde ROM non vuote, non doppie, non forme di base, con corpo >= min_body."""
+def density(cycle: np.ndarray, db: float = -30.0) -> int:
+    """Quante armoniche (fra le prime 40) stanno entro `db` dalla piu' forte. Organo a registri:
+    ~4-8; dente di sega: 31. I timbri synth-pop/EBM (sega, impulsi, sync, formanti) sono densi."""
+    m = np.abs(np.fft.rfft(np.asarray(cycle, dtype=np.float64)))[1:BAND + 1]
+    return int(np.sum(20 * np.log10(m / (m.max() or 1) + 1e-12) > db))
+
+
+def candidates(rom: np.ndarray, threshold: float = 0.95, min_body: float = 0.0,
+               min_density: int = 0) -> list[int]:
+    """Indici delle onde ROM non vuote, non doppie, non forme di base, con corpo >= min_body e
+    almeno min_density armoniche forti."""
     seen, out = set(), []
     for i, h in enumerate(rom):
         key = h.tobytes()
@@ -333,7 +366,7 @@ def candidates(rom: np.ndarray, threshold: float = 0.95, min_body: float = 0.0) 
             continue
         seen.add(key)
         c = ppg_expand(h)
-        if basic_shape(c, threshold) is None and body(c) >= min_body:
+        if basic_shape(c, threshold) is None and body(c) >= min_body and density(c) >= min_density:
             out.append(i)
     return out
 
@@ -354,14 +387,19 @@ def most_diverse(cycles: list[np.ndarray], n: int) -> list[int]:
     return picked
 
 
-MIN_BODY = 0.7                                 # default di --curated (vedi body())
+# Default di --curated. Su hardware: senza corpo il banco suonava corto (filtro); con il solo corpo
+# (>= 0.7) diventava un organo (6 armoniche forti per frame). Densita' + un po' di corpo.
+MIN_BODY = 0.3
+MIN_DENSITY = 15
 
 
-def curate(rom: np.ndarray, n: int = FRAMES, threshold: float = 0.95, min_body: float = MIN_BODY) -> list[int]:
-    """Le n onde ROM piu' diverse fra quelle non di base e con corpo, ordinate da scure a brillanti."""
-    cand = candidates(rom, threshold, min_body)
+def curate(rom: np.ndarray, n: int = FRAMES, threshold: float = 0.95, min_body: float = MIN_BODY,
+           min_density: int = MIN_DENSITY) -> list[int]:
+    """Le n onde ROM piu' diverse fra quelle non di base, dense e con corpo."""
+    cand = candidates(rom, threshold, min_body, min_density)
     if len(cand) < n:
-        raise ValueError(f"solo {len(cand)} onde con corpo >= {min_body}: abbassa --min-body o usa --fill-max")
+        raise ValueError(f"solo {len(cand)} onde con corpo >= {min_body} e densita' >= {min_density}: "
+                         "abbassa --min-body / --min-density o usa --fill-max")
     cyc = [ppg_expand(rom[i]) for i in cand]
     picked = [cand[k] for k in most_diverse(cyc, n)]
     return sorted(picked, key=lambda i: brightness(ppg_expand(rom[i])))

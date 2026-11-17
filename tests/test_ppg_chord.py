@@ -15,6 +15,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "mods" / "ppg-chord")]
 import make_patch as mp  # noqa: E402
+import tables  # noqa: E402
 import waves  # noqa: E402
 
 STOCK = ROOT / "firmware" / "Syntakt_OS1.41.syx"
@@ -310,7 +311,7 @@ def test_curate_skips_empty_duplicates_and_basic(tmp_path):
     # i seni sono "forme di base" solo se la fondamentale domina: l'onda 0 (fondamentale) lo e'
     cand = waves.candidates(rom)
     assert 0 not in cand and 5 not in cand and 6 not in cand
-    picked = waves.curate(rom, 3, min_body=0.0)
+    picked = waves.curate(rom, 3, min_body=0.0, min_density=0)
     assert len(picked) == 3 and set(picked) <= set(cand)
     b = [waves.brightness(waves.ppg_expand(rom[i])) for i in picked]
     assert b == sorted(b)
@@ -380,7 +381,7 @@ def test_curated_bank_requires_body(tmp_path):
     assert waves.candidates(rom, min_body=0.7) == [1, 2]        # 0 = seno (forma di base), 3+ = senza corpo
     with pytest.raises(ValueError, match="corpo"):
         waves.curate(rom, 3)                                     # default 0.7: non bastano
-    assert len(waves.curate(rom, 3, min_body=0.0)) == 3
+    assert len(waves.curate(rom, 3, min_body=0.0, min_density=0)) == 3
 
 
 def test_body_report_flags_thin_banks():
@@ -391,3 +392,99 @@ def test_body_report_flags_thin_banks():
     full = thin.copy()
     full[:, :256] = np.round(np.sin(2 * np.pi * t) * waves.PEAK)
     assert "poco corpo" not in mp.body_report(full)
+
+
+# ------------------------------------------------------------ wavetable progettate (synth-pop / EBM)
+
+@pytest.mark.parametrize("name", list(tables.TABLES))
+def test_designed_tables_have_bank_format(name):
+    f, labels = tables.table(name)
+    assert f.shape == (31, 256) and len(labels) == 31
+    assert (f[:, 0] == 0).all()
+    assert np.allclose(np.abs(f).max(axis=1), 1.0)
+    mag = np.abs(np.fft.rfft(f, axis=1))
+    assert mag[:, tables.DEFAULT_HARMONICS + 1:].max() < 1e-9 * mag.max()      # banda limitata
+    q = waves.bank_q31(f)
+    assert (q[:, 0] == 0).all() and (q[:, 256] == 0).all() and np.abs(q).max() == waves.PEAK
+
+
+@pytest.mark.parametrize("name", list(tables.FAMILIES))
+def test_designed_families_morph_smoothly(name):
+    f, _ = tables.table(name)
+    corr = [f[k] @ f[k + 1] / np.linalg.norm(f[k]) / np.linalg.norm(f[k + 1]) for k in range(30)]
+    assert min(corr) > 0.4, name                     # stessa fase fra frame vicini: niente cancellazioni
+
+
+def test_designed_tables_start_on_a_true_rising_zero():
+    for name in tables.FAMILIES:
+        f, _ = tables.table(name, harmonics=127)
+        assert (f[:, 1] > 0).all() or np.median(f[:, 1]) > 0, name        # salita dopo lo zero
+
+
+def test_ebm_zones_cover_the_bank():
+    z = tables.zones()
+    assert z[0][1] == 4 and z[-1][2] == 124
+    assert all(b[1] == a[2] + 4 for a, b in zip(z, z[1:]))
+    _, labels = tables.table("ebm")
+    assert [lbl.split()[0] for lbl in labels][:7] == ["reso"] * 7
+
+
+def test_designed_tables_are_dense_not_organ():
+    """Il motivo delle tabelle: timbri densi (sega, impulsi, sync, formanti), non d'organo."""
+    dens = {n: np.median([waves.density(x) for x in tables.table(n)[0]]) for n in ("reso", "pwm", "sync", "ebm")}
+    assert all(d >= 10 for d in dens.values()), dens
+
+
+def test_table_rejects_bad_harmonics():
+    with pytest.raises(ValueError):
+        tables.table("pwm", harmonics=128)
+    with pytest.raises(KeyError):
+        tables.table("nope")
+
+
+def test_density_measure():
+    t = np.arange(256) / 256
+    saw = sum(np.sin(2 * np.pi * h * t) / h for h in range(1, 64))
+    organ = sum(a * np.sin(2 * np.pi * h * t) for h, a in {1: 1, 2: .8, 3: .6, 4: .5, 6: .35, 8: .25}.items())
+    assert waves.density(saw) >= 30 and waves.density(organ) == 6
+
+
+def test_grit_adds_ppg_images_and_keeps_format():
+    c = waves.design("vox").cycle
+    clean, grit = waves.condition(c, 63), waves.condition(c, 127, grit=True)
+    assert abs(grit[0]) < 1e-9 and np.isclose(np.abs(grit).max(), 1)
+    mag = np.abs(np.fft.rfft(grit))
+    assert (mag[64:128] ** 2).sum() > 1e-4 * (mag ** 2).sum()          # immagine sopra la 63a
+    assert grit @ clean / np.linalg.norm(grit) / np.linalg.norm(clean) > 0.98   # stessa onda, stessa fase
+    with pytest.raises(ValueError):
+        waves.condition(c, 64)                                          # senza grit: max 63
+
+
+def test_cli_table_build_and_ebm_preview(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    none = str(tmp_path / "none.syx")
+    assert mp.main(["build", "--stock", none, "--table", "ebm"]) == 0
+    spec = json.loads((tmp_path / "patch.json").read_text())
+    assert spec["wave"]["source"] == "table-ebm" and spec["wave"]["harmonics"] == tables.DEFAULT_HARMONICS
+    assert spec["wave"]["frames"]["4"].startswith("reso") and spec["wave"]["frames"]["124"].startswith("metal")
+    out = tmp_path / "pv"
+    assert mp.main(["preview", "--table", "pwm", "--ebm", "-o", str(out)]) == 0
+    assert (out / "table-pwm_ebm.wav").stat().st_size > 100_000
+
+
+def test_cli_ppg_table_with_grit(tmp_path, monkeypatch):
+    f, _ = synthetic_rom(tmp_path)
+    monkeypatch.setattr(mp, "HERE", tmp_path)
+    assert mp.main(["build", "--stock", str(tmp_path / "n.syx"), "--ppg-rom", str(f), "--ppg-table", "0",
+                    "--grit"]) == 0
+    spec = json.loads((tmp_path / "patch.json").read_text())
+    assert spec["wave"]["source"] == "ppg-wt00-grit" and spec["wave"]["harmonics"] == 127
+
+
+@needs_stock
+def test_emulated_sy_chord_plays_ebm_table():
+    pytest.importorskip("unicorn")
+    q = waves.bank_q31(tables.table("ebm")[0])
+    stock = np.array(mp.emu_render(None, 64, 48, 0.1), dtype=float)
+    new = np.array(mp.emu_render(mp.bank_bytes(q), 64, 48, 0.1), dtype=float)
+    assert np.max(np.abs(new)) > 0.2 * np.max(np.abs(stock)) and not np.allclose(stock, new)

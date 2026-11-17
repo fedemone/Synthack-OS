@@ -1,6 +1,6 @@
 # ppg-chord: PPG wavetable for SY CHORD
 
-This mod puts a **PPG-style wavetable** into SY CHORD's wave bank. Turning **WAVE** from 4 to 124 then sweeps through the table, and SY CHORD blends neighbouring frames, much as the PPG Wave scans its tables. You can p-lock WAVE or modulate it like any other machine parameter.
+This mod puts **PPG-style wavetables** into SY CHORD's wave bank. There are designed tables for synth-pop / EBM, tables from the PPG ROM, or a curated selection of PPG waves. Turning **WAVE** from 4 to 124 then sweeps through the table, and SY CHORD blends neighbouring frames, much as the PPG Wave scans its tables. You can p-lock WAVE or modulate it like any other machine parameter.
 
 - **Replaces:** MAX's *SY CHORD Wave Bank*. It writes the same region, so you use one or the other (see [Builds](#builds)).
 - **Unchanged:** WAVE 0 (a sine shared with other machines), every other machine, and the screen pictures. The small wave picture for WAVE still shows the stock shapes, by choice.
@@ -21,16 +21,44 @@ This mod puts a **PPG-style wavetable** into SY CHORD's wave bank. Turning **WAV
 
 The bank layout comes from [syntakt-firmware-workbench](https://github.com/Bezronczek/syntakt-firmware-workbench) (Bezronczek, MIT), measured on hardware; see [docs/audio-path.md](../../docs/audio-path.md). The PPG format comes from [wave-stuff](https://github.com/Jacajack/wave-stuff).
 
+## Designed tables for synth-pop / EBM (default)
+
+![designed tables](tables.png)
+
+These are our own tables, generated in `tables.py`. They need no ROM and are committed. Each is a smooth 31-frame morph: frames stay in phase and every frame starts on a true rising zero.
+
+| Table | Morph (WAVE 4 → 124) | For |
+|---|---|---|
+| `reso` | saw through a resonant low-pass opening from the 1.5th to the 48th harmonic | EBM bass and leads, the PPG "sweep" |
+| `pwm` | pulse 50 % → 5 % | PWM pads and basses |
+| `vowel` | vowels A → E → I → O → U (formants) | digital choirs, great with SY CHORD's unison |
+| `sync` | hard sync, ratio 1 → 8, with some master saw | aggressive leads |
+| `fold` | wavefolder, gain 1 → 12 | rough digital tones |
+| `brass` | FM 1:1, index 0 → 7 | digital brass that opens up |
+| `metal` | FM 1:3, index 0 → 6 | bells, metallic hits |
+| **`ebm`** | **zones:** reso WAVE 4–28 · pwm 32–52 · vowel 56–80 · sync 84–104 · metal 108–124 | variety in one bank; **the committed default** |
+
+- **Band limit:** these are brighter than the PPG conversions: 64 harmonics by default instead of 40, up to 127 with `--harmonics`.
+- **`ebm` zones:** pick a zone with WAVE, then sweep inside it per note. LFO in ONE mode with a small depth, e.g. WAVE 4 + 24 for a filter-like bass sweep.
+- **`build` vs `preview`:** `build --table NAME` writes the bank. `preview --table all` renders a chord sweep per table, and `preview --table reso --ebm` a 16th-note bass line where each note sweeps WAVE once.
+
+**Why these exist.** The earlier PPG selections sounded like an organ on hardware, and measuring explains it:
+- A drawbar organ has ~4–8 strong harmonics (within 30 dB of the loudest); a saw has 31.
+- Both curated PPG banks had a median of **6–9** per frame. Two rules caused it: "no basic shapes" removed exactly the saw/pulse family, and the body rule favoured flute/organ spectra.
+- Synth-pop and EBM timbres are dense: saw and pulse, resonance, sync, formants.
+
 ## Sources
 
 - **A PPG wavetable** (0–28) from your **local** copy of wave-stuff's `data/ppg_data.c`. Keep it in `local/` (git-ignored). A `patch.json` built from it contains data derived from that ROM.
 - **A curated bank** (`--curated`): 31 single ROM waves instead of one table. The ROM holds 241 distinct waves for 31 frames, so a choice is made:
-  - waves **without body** are dropped: harmonics 1–3 must carry at least 70 % of the energy (`--min-body`, default 0.7). Without this rule the "most different" waves were almost all high harmonics: body 0.29 against 0.96 for the stock bank. On hardware they sounded short and thin, because the closing low-pass filter removes nearly all of such a wave. In the emulator, same sound: 3.4 dB quieter and decaying 3 dB faster than stock. With the rule the bank's body is 0.89; it sounds as loud as MAX's bank and sustains like stock. 62 non-basic PPG waves pass.
+  - **sparse (organ-like) waves** are dropped: at least 15 of the first 40 harmonics within 30 dB of the strongest (`--min-density`, default 15).
+  - waves **without body** are dropped: harmonics 1–3 must carry at least 30 % of the energy (`--min-body`, default 0.3). An earlier default of 0.7 kept only flute/organ spectra. Without this rule the "most different" waves were almost all high harmonics: body 0.29 against 0.96 for the stock bank. On hardware they sounded short and thin, because the closing low-pass filter removes nearly all of such a wave. In the emulator, same sound: 3.4 dB quieter and decaying 3 dB faster than stock. 37 non-basic PPG waves pass both rules.
   - empty waves, duplicates and **basic shapes** are dropped. A wave counts as basic when its spectrum is ≥ 0.95 similar to a sine, saw, square, triangle or 6–38 % pulse; that's 55 of the 241, leaving 186.
   - the 31 most different from each other are kept;
   - they are ordered so that each wave resembles the next. The order starts from the darkest and roughly brightens; neighbour similarity rises from ~0.25 to ~0.6, so SY CHORD's blends between frames stay musical. `--order brightness` gives a strict dark → bright order instead.
 - **Your own list** (`--ppg-waves 12,40,77,…`, up to 31). In the catalog, star ROM waves and press *Starred ROM waves → bank* to get the command. With fewer than 31, `--fill-max` completes the bank from MAX's SY CHORD bank: first its 21 non-basic waves (FM, formant, wavefold, sync, organ, chord waves…), then, only if still needed, its saws and pulses.
-- **Our 7 designed waves** (`--designed`): hollow, brass, vox, glass, reso, sync, organ. They are spread over the table in order and interpolated. You can give your own order, for example `--designed vox glass reso`. These need no ROM, and the committed `patch.json` is this table.
+- **PPG grit** (`--grit`, for PPG sources): reads each 8-bit PPG wave "in steps", as the PPG did without smoothing. This adds its images above the 63rd harmonic, up to the 127th: a little digital sparkle. The effect is subtle, about 0.2 % of the energy.
+- **Our 7 designed waves** (`--designed`): hollow, brass, vox, glass, reso, sync, organ. They are spread over the table in order and interpolated. You can give your own order, for example `--designed vox glass reso`. These need no ROM.
 
 ![designed waves](waves.png)
 
@@ -64,6 +92,9 @@ python mods/ppg-chord/make_patch.py catalog --ppg-rom local/ppg_data.c    # out/
 python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --all   # one WAV per table: chord sweeping WAVE 4 -> 124
 python mods/ppg-chord/make_patch.py preview --ppg-rom local/ppg_data.c --ppg-table 5 --hold 64
 python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-table 5    # writes patch.json
+python mods/ppg-chord/make_patch.py build   --table ebm                # the committed default; also reso, pwm, vowel, sync, fold, brass, metal
+python mods/ppg-chord/make_patch.py preview --table all --ebm          # one EBM bass line per designed table
+python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-table 7 --grit
 python mods/ppg-chord/make_patch.py build   --designed
 python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --curated
 python mods/ppg-chord/make_patch.py build   --ppg-rom local/ppg_data.c --ppg-waves 12,40,77 --fill-max

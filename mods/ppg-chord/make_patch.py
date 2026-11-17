@@ -33,6 +33,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path[:0] = [str(HERE), str(REPO / "tools" / "unpack"), str(REPO / "tools" / "emu")]
+import tables  # noqa: E402
 import waves  # noqa: E402
 from wav import SAMPLE_RATE, write_q31  # noqa: E402
 
@@ -100,8 +101,8 @@ def stock_region(sec7: bytes) -> bytes:
     return region
 
 
-def make_bank(cycles: list[np.ndarray], harmonics: int) -> np.ndarray:
-    return waves.bank_q31(waves.bank(cycles, harmonics))
+def make_bank(cycles: list[np.ndarray], harmonics: int, grit: bool = False) -> np.ndarray:
+    return waves.bank_q31(waves.bank(cycles, harmonics, grit))
 
 
 def build_spec(q31: np.ndarray, source: str, harmonics: int, labels: list[str] | None = None) -> dict:
@@ -145,6 +146,32 @@ def render(q31: np.ndarray, wave_from: float = 4, wave_to: float = 124, seconds:
     rel = min(int(0.3 * SAMPLE_RATE), n // 2)
     env[-rel:] *= np.linspace(1, 0, rel)
     return out * env / len(notes)
+
+
+def render_sequence(q31: np.ndarray, wave: float = 4, depth: float = 24, bpm: float = 125,
+                    notes: tuple[int, ...] = (36, 36, 48, 36, 36, 39, 36, 43) * 4) -> np.ndarray:
+    """Basso EBM in sedicesimi: ogni nota parte da WAVE `wave` e sale di `depth` in ~0.12 s, come
+    un LFO in modalita' ONE su WAVE (l'inviluppo sulla wavetable del PPG). Inviluppo d'ampiezza
+    corto. Solo ascolto."""
+    fr = np.asarray(q31, dtype=np.float64)[:, :waves.FRAME_SAMPLES] / 2 ** 31
+    step = int(SAMPLE_RATE * 60 / bpm / 4)
+    out = np.zeros(step * len(notes))
+    t = np.arange(step) / SAMPLE_RATE
+    sweep = wave + depth * (1 - np.exp(-t / 0.04))
+    pos = np.clip(sweep / 4 - 1, 0, waves.FRAMES - 1)
+    lo = np.minimum(pos.astype(np.int64), waves.FRAMES - 2)
+    mix = pos - lo
+    amp = np.minimum(1, t / 0.002) * np.exp(-t / 0.09)
+    for i, note in enumerate(notes):
+        f = 440.0 * 2 ** ((note - 69) / 12)
+        ph = (t * f) % 1.0 * waves.FRAME_SAMPLES
+        k = ph.astype(np.int64)
+        u = ph - k
+        k2 = (k + 1) % waves.FRAME_SAMPLES
+        a = fr[lo, k] * (1 - u) + fr[lo, k2] * u
+        b = fr[lo + 1, k] * (1 - u) + fr[lo + 1, k2] * u
+        out[i * step:(i + 1) * step] = (a * (1 - mix) + b * mix) * amp
+    return out
 
 
 def write_wav(path: Path, x: np.ndarray) -> None:
@@ -212,11 +239,11 @@ def curated(a: argparse.Namespace) -> tuple[str, np.ndarray, list[str]]:
         name = "ppg-custom"
     else:
         try:
-            idx = waves.curate(rom, waves.FRAMES, a.basic_threshold, a.min_body)
+            idx = waves.curate(rom, waves.FRAMES, a.basic_threshold, a.min_body, a.min_density)
         except ValueError as error:
             raise SystemExit(str(error)) from error
         name = "ppg-curated"
-    items = [(f"PPG #{i}", waves.condition(waves.ppg_expand(rom[i]), a.harmonics)) for i in idx]
+    items = [(f"PPG #{i}", waves.condition(waves.ppg_expand(rom[i]), a.harmonics, a.grit)) for i in idx]
     if len(items) < waves.FRAMES:
         if not a.fill_max:
             raise SystemExit(f"{len(items)} onde per {waves.FRAMES} frame: aggiungi --fill-max (onde di MAX) "
@@ -229,7 +256,7 @@ def curated(a: argparse.Namespace) -> tuple[str, np.ndarray, list[str]]:
             mine = [f for _, f in items]
             pick = waves.most_diverse(mine + [f for _, f in extra], len(mine) + len(extra))
             pick = [k - len(mine) for k in pick if k >= len(mine)][:need]
-            items += [(extra[k][0], waves.condition_frame(extra[k][1], a.harmonics)) for k in pick]
+            items += [(extra[k][0], waves.condition_frame(extra[k][1], min(a.harmonics, 127))) for k in pick]
         name += "+max"
     frames = [f for _, f in items]
     order = waves.order_smooth(frames) if a.order == "smooth" else \
@@ -246,13 +273,13 @@ def pick_source(a: argparse.Namespace) -> list[tuple[str, list[np.ndarray]]]:
         return [("designed", waves.designed_cycles(a.designed or None))]
     if not a.ppg_rom:
         raise SystemExit("serve --ppg-rom local/ppg_data.c con --ppg-table T (o --designed)")
-    rom, tables = waves.parse_ppg_rom(a.ppg_rom), waves.parse_ppg_wavetables(a.ppg_rom)
-    ids = range(len(tables)) if getattr(a, "all", False) else [a.ppg_table]
+    rom, tabs = waves.parse_ppg_rom(a.ppg_rom), waves.parse_ppg_wavetables(a.ppg_rom)
+    ids = range(len(tabs)) if getattr(a, "all", False) else [a.ppg_table]
     out = []
     for t in ids:
-        if t is None or not 0 <= t < len(tables):
-            raise SystemExit(f"--ppg-table: 0..{len(tables) - 1}")
-        out.append((f"ppg-wt{t:02d}", waves.table_cycles(rom, tables[t])))
+        if t is None or not 0 <= t < len(tabs):
+            raise SystemExit(f"--ppg-table: 0..{len(tabs) - 1}")
+        out.append((f"ppg-wt{t:02d}", waves.table_cycles(rom, tabs[t])))
     return out
 
 
@@ -277,14 +304,24 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--order", choices=("smooth", "brightness"), default="smooth",
                        help="banco curato: smooth = ogni onda simile alla successiva (default), "
                             "brightness = da scura a brillante")
+        p.add_argument("--table", choices=[*tables.TABLES, "all"],
+                       help="wavetable progettata per synth-pop/EBM (nostra, senza ROM): "
+                            + "; ".join(f"{k}: {v}" for k, v in tables.TABLES.items()))
+        p.add_argument("--grit", action="store_true",
+                       help="onde PPG lette 'a gradini' come il PPG (immagini fino alla 127a armonica): "
+                            "un po' di brillantezza digitale in piu'")
         p.add_argument("--min-body", type=float, default=waves.MIN_BODY,
-                       help="banco curato: quota minima di energia nelle armoniche 1-3 (default 0.7; stock 0.96, "
-                            "MAX 0.76). Onde senza corpo suonano corte e piano col filtro che si chiude")
+                       help=f"banco curato: quota minima di energia nelle armoniche 1-3 (default {waves.MIN_BODY}; "
+                            "stock 0.96, MAX 0.76): senza corpo il suono e' corto col filtro che si chiude")
+        p.add_argument("--min-density", type=int, default=waves.MIN_DENSITY,
+                       help=f"banco curato: armoniche forti (entro 30 dB) minime fra le prime 40 (default "
+                            f"{waves.MIN_DENSITY}; organo ~4-8, dente di sega 31): evita il suono d'organo")
         p.add_argument("--basic-threshold", type=float, default=0.95,
                        help="somiglianza (0..1) oltre la quale un'onda conta come forma di base")
-        p.add_argument("--harmonics", type=int, default=40,
-                       help="limite di banda (1..63, default 40 come Workbench): piu' alto = piu' brillante, "
-                            "ma SY CHORD usa un solo frame per tutte le note, quindi aliasing in alto")
+        p.add_argument("--harmonics", type=int,
+                       help="limite di banda: default 40 per le onde PPG (max 63), 127 con --grit, "
+                            f"{tables.DEFAULT_HARMONICS} per --table (max 127). Piu' alto = piu' brillante, ma SY "
+                            "CHORD usa un solo frame per tutte le note: aliasing sulle note alte")
 
     p = sub.add_parser("preview", help="WAV: un accordo che scorre WAVE 4 -> 124 (non serve il firmware)")
     src_args(p)
@@ -293,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--root", type=int, default=48, help="nota MIDI (48 = C3)")
     p.add_argument("--seconds", type=float, default=6.0)
     p.add_argument("--hold", type=float, help="WAVE fisso invece dello scorrimento (4..124)")
+    p.add_argument("--ebm", action="store_true",
+                   help="invece dell'accordo: basso EBM in sedicesimi, ogni nota scorre WAVE una volta "
+                        "(come un LFO in modalita' ONE su WAVE)")
+    p.add_argument("--ebm-wave", type=float, default=4, help="WAVE di partenza di ogni nota (default 4)")
+    p.add_argument("--ebm-depth", type=float, default=24, help="di quanto sale WAVE in ogni nota (default 24)")
     p.add_argument("-o", "--out", type=Path, default=OUT / "preview")
 
     b = sub.add_parser("build", help="scrive mods/ppg-chord/patch.json")
@@ -312,43 +354,25 @@ def main(argv: list[str] | None = None) -> int:
               f"{'' if a.ppg_rom else ' (senza --ppg-rom: solo le progettate)'}")
         return 0
 
-    if a.ppg_rom and (a.curated or a.ppg_waves):
-        name, q, labels = curated(a)
-        if a.cmd == "preview":
-            lo, hi = (a.hold, a.hold) if a.hold is not None else (4, 124)
-            path = a.out / f"{name}_{a.chord}{'' if a.hold is None else f'_w{a.hold:g}'}.wav"
-            write_wav(path, render(q, lo, hi, a.seconds, a.root, a.chord))
-            print(f"  {name}: WAVE {lo:g}->{hi:g} -> {path}")
-            for k, label in enumerate(labels, 1):
-                print(f"    WAVE {4 * k:3d}: {label}")
-            return 0
-        if a.stock.exists():
-            stock_region(load_section7(a.stock))
-            print("banco stock verificato (OS 1.41)")
-        spec = build_spec(q, name, a.harmonics, labels)
-        (HERE / "patch.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
-        print(f"patch.json: {name} -> WAVE 4..124 ({BANK_LEN} B a {BANK_ADDR:#x}); WAVE 0 e schermo invariati")
-        for k, label in enumerate(labels, 1):
-            print(f"  WAVE {4 * k:3d}: {label}")
-        print(body_report(q))
-        return 0
-    if a.curated or a.ppg_waves:
+    if (a.curated or a.ppg_waves) and not a.ppg_rom:
         raise SystemExit("--curated / --ppg-waves richiedono --ppg-rom")
-
-    sources = pick_source(a)
+    banks = resolve_banks(a)
     if a.cmd == "preview":
-        for name, cycles in sources:
-            q = make_bank(cycles, a.harmonics)
+        for name, q, labels in banks:
+            if a.ebm:
+                path = a.out / f"{name}_ebm.wav"
+                write_wav(path, render_sequence(q, a.ebm_wave, a.ebm_depth))
+                print(f"  {name}: basso EBM, WAVE {a.ebm_wave:g} -> {a.ebm_wave + a.ebm_depth:g} per nota -> {path}")
+                continue
             lo, hi = (a.hold, a.hold) if a.hold is not None else (4, 124)
             path = a.out / f"{name}_{a.chord}{'' if a.hold is None else f'_w{a.hold:g}'}.wav"
             write_wav(path, render(q, lo, hi, a.seconds, a.root, a.chord))
             print(f"  {name}: WAVE {lo:g}->{hi:g} -> {path}")
         return 0
 
-    if len(sources) != 1:
+    if len(banks) != 1:
         raise SystemExit("build: una sola sorgente")
-    name, cycles = sources[0]
-    q = make_bank(cycles, a.harmonics)
+    name, q, labels = banks[0]
     sec7 = None
     if a.stock.exists():
         sec7 = load_section7(a.stock)
@@ -356,9 +380,15 @@ def main(argv: list[str] | None = None) -> int:
         print("banco stock verificato (OS 1.41)")
     else:
         print(f"{a.stock} assente: impronta del banco stock presa dal manifest di MAX (il build la riverifica)")
-    spec = build_spec(q, name, a.harmonics)
+    spec = build_spec(q, name, a.harmonics, labels)
     (HERE / "patch.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     print(f"patch.json: {name} -> WAVE 4..124 ({BANK_LEN} B a {BANK_ADDR:#x}); WAVE 0 e schermo invariati")
+    if a.table == "ebm":
+        for fam, lo, hi in tables.zones():
+            print(f"  WAVE {lo:3d}-{hi:3d}: {fam}")
+    elif not a.table and labels and not labels[0].startswith("posizione"):
+        for k, label in enumerate(labels, 1):
+            print(f"  WAVE {4 * k:3d}: {label}")
     print(body_report(q))
     if a.emu:
         if sec7 is None:
@@ -370,6 +400,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  emulatore {label}: picco {peak:.1f} dBFS -> {path}")
     return 0
 
+
+def resolve_banks(a: argparse.Namespace) -> list[tuple[str, np.ndarray, list[str]]]:
+    """[(nome, (31, 257) int32, etichette)] secondo le opzioni; fissa anche a.harmonics se manca."""
+    if a.table:
+        a.harmonics = a.harmonics or tables.DEFAULT_HARMONICS
+        names = list(tables.TABLES) if a.table == "all" else [a.table]
+        out = []
+        for n in names:
+            frames, labels = tables.table(n, a.harmonics)
+            out.append((f"table-{n}", waves.bank_q31(frames), labels))
+        return out
+    a.harmonics = a.harmonics or (127 if a.grit else 40)
+    if a.curated or a.ppg_waves:
+        return [curated(a)]
+    labels = [f"posizione {p}" for p in waves.TABLE_POSITIONS]
+    return [(name + ("-grit" if a.grit else ""), make_bank(cycles, a.harmonics, a.grit), labels)
+            for name, cycles in pick_source(a)]
 
 if __name__ == "__main__":
     sys.exit(main())

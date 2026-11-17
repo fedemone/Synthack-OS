@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+import tables
 import waves
 
 
@@ -40,6 +41,17 @@ def build(ppg_rom: Path | None, out: Path, cmd: str = "python mods/ppg-chord/mak
     data = {"designed": [{"name": n, "desc": d, "b": round(_brightness(c), 1)} for n, d, c in designed],
             "designedCycles": _b64_cycles([c for _, _, c in designed]),
             "rom": [], "romCycles": "", "tables": [], "curated": [], "rel": str(ppg_rom) if ppg_rom else "", "cmd": cmd}
+    # wavetable progettate (nostre): 31 frame ciascuna, ridotti a 128 campioni per l'ascolto
+    dt, dcyc = [], []
+    for name, desc in tables.TABLES.items():
+        frames, _ = tables.table(name)
+        for f in frames:
+            spec = np.fft.rfft(f)[:waves.HALF]
+            dcyc.append(np.fft.irfft(spec, n=waves.CYCLE) * (waves.CYCLE / waves.FRAME_SAMPLES))
+            dcyc[-1] = dcyc[-1] / np.max(np.abs(dcyc[-1])) * 120
+        dt.append({"name": name, "desc": desc})
+    data["dtables"] = dt
+    data["dtCycles"] = _b64_cycles(dcyc)
     if ppg_rom:
         rom = waves.parse_ppg_rom(ppg_rom)
         cycles = [waves.ppg_expand(h) for h in rom]
@@ -58,10 +70,10 @@ def build(ppg_rom: Path | None, out: Path, cmd: str = "python mods/ppg-chord/mak
             picked = []
         frames = [waves.condition(cycles[i]) for i in picked]
         data["curated"] = [picked[k] for k in waves.order_smooth(frames)] if picked else []
-        tables = waves.parse_ppg_wavetables(ppg_rom)
-        data["tables"] = [[[p, w] for p, w in keys] for keys in tables]
+        ppg_tables = waves.parse_ppg_wavetables(ppg_rom)
+        data["tables"] = [[[p, w] for p, w in keys] for keys in ppg_tables]
         data["tableBody"] = [round(float(np.median([waves.body(c) for c in waves.table_cycles(rom, k)])), 2)
-                             for k in tables]
+                             for k in ppg_tables]
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(PAGE.replace("/*DATA*/null", json.dumps(data, separators=(",", ":")))
                    .replace("__TITLE__", html.escape("PPG Chord Waves")), encoding="utf-8")
@@ -127,7 +139,8 @@ function play(c,dur=1.5){ac=ac||new AudioContext();stop();
  const pw=pwave(c),notes=document.getElementById("chord").value.split(",").map(Number),root=+document.getElementById("root").value;
  const g=ac.createGain(),t=ac.currentTime,lv=.5/notes.length;g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(lv,t+.01);g.gain.setValueAtTime(lv,t+dur-.4);g.gain.linearRampToValueAtTime(0,t+dur);g.connect(ac.destination);
  notes.forEach((n,i)=>{const o=ac.createOscillator();o.setPeriodicWave(pw);o.frequency.value=440*Math.pow(2,(root+n-69)/12)*Math.pow(2,(i-(notes.length-1)/2)*4/1200);o.connect(g);o.start(t);o.stop(t+dur+.1);voices.push(o)});return voices}
-function sweep(keys){const cs=[];for(let s=0;s<61;s+=2)cs.push(slotCycle(keys,s));const os=play(cs[0],6.2),pws=cs.map(pwave);
+function sweep(keys){const cs=[];for(let s=0;s<61;s+=2)cs.push(slotCycle(keys,s));sweepCycles(cs)}
+function sweepCycles(cs){const os=play(cs[0],6.2),pws=cs.map(pwave);
  pws.forEach((pw,i)=>timers.push(setTimeout(()=>os.forEach(o=>{try{o.setPeriodicWave(pw)}catch(e){}}),i*6000/31)))}
 function select(card,label,args,c){document.querySelectorAll(".card.sel").forEach(e=>e.classList.remove("sel"));card.classList.add("sel");
  document.getElementById("sel").textContent=label;document.getElementById("cmd").textContent=args?D.cmd+" build "+args:"";play(c)}
@@ -138,7 +151,7 @@ function card(id,label,sub,c,args,extra=""){const d=document.createElement("div"
 const rom=D.rel?`--ppg-rom ${D.rel} `:"";let tab="designed";
 function render(){document.querySelectorAll("[data-tab]").forEach(b=>b.classList.toggle("on",b.dataset.tab===tab));
  const M=document.getElementById("main"),srt=document.getElementById("sort").value,hide=document.getElementById("hide").checked,only=document.getElementById("stars").checked;M.innerHTML="";
- if(tab!=="designed"&&!D.rom.length){M.innerHTML='<p class="note">No ROM loaded. Run <code>make_patch.py catalog --ppg-rom local/ppg_data.c</code> with your local copy of wave-stuff\'s data/ppg_data.c.</p>';return}
+ if((tab==="rom"||tab==="curated")&&!D.rom.length){M.innerHTML='<p class="note">No ROM loaded. Run <code>make_patch.py catalog --ppg-rom local/ppg_data.c</code> with your local copy of wave-stuff\'s data/ppg_data.c.</p>';return}
  if(tab==="designed"){const G=document.createElement("div");G.className="grid";let L=D.designed.map((w,i)=>({...w,i}));if(srt==="b")L.sort((a,b)=>a.b-b.b);
   M.insertAdjacentHTML("beforeend",'<p class="note">Our 7 waves. As a wavetable they are spread over WAVE 4…124 in this order (or the order you give to <code>--designed</code>).</p>');
   L.filter(w=>!only||stars.has("d:"+w.name)).forEach(w=>{const c=card("d:"+w.name,w.name,"bright "+w.b,cyc(DC,w.i),"--designed");c.title=w.desc;G.append(c)});M.append(G);return}
@@ -153,6 +166,14 @@ function render(){document.querySelectorAll("[data-tab]").forEach(b=>b.classList
   const args=rom+"--curated";document.getElementById("cs").onclick=()=>{sweep(keys);document.getElementById("sel").textContent="Curated bank: WAVE 4 → 124";document.getElementById("cmd").textContent=D.cmd+" build "+args};
   const G=document.createElement("div");G.className="grid";
   D.curated.forEach((w,i)=>G.append(card("w:"+w,"W"+(4+4*i),"#"+w+" · bright "+D.rom[w].b,cyc(RC,w),args)));M.append(G);return}
+ if(tab==="tables"){const DT=dec(D.dtCycles);
+  M.insertAdjacentHTML("beforeend",'<h2 style="font-size:15px;margin:4px 0 6px">Designed for synth-pop / EBM (ours, no ROM needed)</h2><p class="note">Each is a smooth 31-frame morph: sweep WAVE, or an LFO in ONE mode on WAVE, as on a PPG. “ebm” packs five families into zones.</p>');
+  D.dtables.forEach((t,i)=>{const S=document.createElement("div");S.className="tbl";const cs=[];for(let k=0;k<31;k++)cs.push(cyc(DT,i*31+k));
+   const args="--table "+t.name;S.innerHTML=`<h3>${t.name}<button>▶ sweep</button></h3><div class="keys">${t.desc}</div>`;
+   S.querySelector("button").onclick=()=>{sweepCycles(cs);document.getElementById("sel").textContent="Table "+t.name+": WAVE 4 → 124";document.getElementById("cmd").textContent=D.cmd+" build "+args};
+   const G=document.createElement("div");G.className="strip";cs.forEach((c,k)=>{if(!only||stars.has("d:"+t.name+":"+k))G.append(card("d:"+t.name+":"+k,"W"+(4+4*k),"",c,args))});S.append(G);M.append(S)});
+  if(!D.rom.length){M.insertAdjacentHTML("beforeend",'<p class="note">PPG tables: run <code>make_patch.py catalog --ppg-rom local/ppg_data.c</code>.</p>');return}
+  M.insertAdjacentHTML("beforeend",'<h2 style="font-size:15px;margin:18px 0 6px">PPG ROM wavetables</h2>')}
  D.tables.forEach((keys,t)=>{const S=document.createElement("div");S.className="tbl";
   const args=rom+`--ppg-table ${t}`;
   const tb=(D.tableBody||[])[t];

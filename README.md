@@ -24,7 +24,7 @@ The exact 31-wave list is in the release notes. MAX is a fixed build, not the Wo
 
 ## PPG wavetable for SY CHORD (this fork)
 
-[`mods/ppg-chord`](mods/ppg-chord) puts a **PPG-style wavetable** into SY CHORD's 31-frame bank: turning WAVE 4 → 124 scans the table, like a PPG Wave. It **replaces** the 31-wave bank above, since both write the same region. Screen pictures stay stock and WAVE 0 is unchanged. Choose one of the 29 tables from your local copy of [wave-stuff](https://github.com/Jacajack/wave-stuff)'s data, or use our 7 designed waves. Browse and hear every table first with the local catalog page.
+[`mods/ppg-chord`](mods/ppg-chord) puts **PPG-style wavetables** into SY CHORD's 31-frame bank: turning WAVE 4 → 124 scans the table, like a PPG Wave. The default is our **`ebm`** bank: zones of resonant saw, PWM, vowels, sync and FM metal for synth-pop / EBM. Other designed tables and PPG ROM tables are available too. It **replaces** the 31-wave bank above, since both write the same region. Screen pictures stay stock and WAVE 0 is unchanged. Choose one of the 29 tables from your local copy of [wave-stuff](https://github.com/Jacajack/wave-stuff)'s data, or use our 7 designed waves. Browse and hear every table first with the local catalog page.
 
 Build with `tools/build/build.py`, where MAX features are available as `max:<name>`, or add `mods/ppg-chord/patch.json` as a *Local patch* in the modular builder with *SY CHORD Wave Bank* unticked. Details: [mods/ppg-chord](mods/ppg-chord).
 
