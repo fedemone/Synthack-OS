@@ -23,8 +23,11 @@ Tutto e' generato qui (nessun dato di terzi). Passi per ogni famiglia (family())
    tutti i frame (dritti o capovolti) e' scelto insieme (_align_chain) per la massima somiglianza
    fra vicini: l'interpolazione di SY CHORD fra frame non si svuota.
 
-Nel banco ebm le zone reso, sync e metal passano anche da deformant(): le "gobbe" dello spettro
-che si muovono con WAVE suonavano come vocali; restano solo nella zona vowel.
+Banchi a zone (zone_bank): piu' famiglie piccole nei 31 frame, anche wavetable della ROM PPG
+(ppgN, dalla copia locale dei dati). Preset: "ebm" (solo famiglie nostre, il banco predefinito) e
+"ebm7" (con le wavetable PPG 23, 26, 14; verificato su hardware). Nelle zone reso, sync, metal e
+PPG le "gobbe" dello spettro passano da deformant(): muovendosi con WAVE suonavano come vocali;
+restano solo nella zona vowel.
 """
 
 from __future__ import annotations
@@ -37,6 +40,10 @@ import waves
 
 FINE = 8192                         # campioni per ciclo per generare le forme nel tempo
 DEFAULT_HARMONICS = 64              # piu' brillante delle onde PPG (40); 1..127
+MIN_NEIGHBOUR = 0.75                # somiglianza minima fra frame vicini: a meta' miscela il calo e' < 0.6 dB
+
+
+# --- spettri e frame -----------------------------------------------------------------------------
 
 
 def _saw_spectrum(h: np.ndarray) -> np.ndarray:
@@ -90,6 +97,8 @@ def _frame(spec: np.ndarray, harmonics: int, prev: np.ndarray | None) -> np.ndar
     best[0] = 0.0
     return best
 
+
+# --- volume a parita' di picco, continuita' fra frame ------------------------------------------------
 
 def _low_crest(spec: np.ndarray, harmonics: int, start: np.ndarray | None, iters: int = 150) -> np.ndarray:
     """Stesse ampiezze armoniche, fasi scelte per un picco basso (meno "spigoli" = piu' energia a
@@ -180,9 +189,6 @@ def _align_chain(frames: np.ndarray, harmonics: int) -> np.ndarray:
     return np.array([cands[t][i] for t, i in enumerate(pick)])
 
 
-MIN_NEIGHBOUR = 0.75      # somiglianza minima fra frame vicini: a meta' miscela il calo e' < 0.6 dB
-
-
 def _loudest_continuous(spec: np.ndarray, harmonics: int, prev: np.ndarray) -> np.ndarray:
     """Il frame piu' forte fra varie intensita' di ottimizzazione (partendo dalle fasi del
     precedente) e il frame con le fasi originali, purche' resti simile al precedente: almeno
@@ -257,6 +263,8 @@ FAMILIES: dict[str, tuple[str, Callable[[float], np.ndarray]]] = {
     "brass": ("FM 1:1, indice 0 -> 7 (ottoni digitali che si aprono)", _fm(1, 7.0)),
     "metal": ("FM 1:3, indice 0 -> 6 (campane, metalli)", _fm(3, 6.0)),
 }
+
+# --- formanti: misura e spianatura ---------------------------------------------------------------
 
 def _trend(mag: np.ndarray, top: int = 64) -> np.ndarray:
     """Andamento liscio dello spettro: retta in scala log-log sulle armoniche 1..top non nulle."""

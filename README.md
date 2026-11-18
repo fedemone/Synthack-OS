@@ -10,7 +10,7 @@ Unofficial community mod bundle for **Elektron Syntakt OS 1.41**, built locally 
 
 This fork builds the MAX feature set with **[`mods/ppg-chord`](mods/ppg-chord) in place of MAX's SY CHORD wave bank**. SY CHORD's WAVE 4 … 124 then scan PPG-style wavetables. The default bank, `ebm`, has zones of resonant saw, PWM, vowels, sync and FM metal for synth-pop / EBM; PPG ROM tables and curated PPG waves are options. WAVE 0, the screen pictures and every other machine are unchanged.
 
-**Hardware:** verified on a Syntakt (OS 1.41) with MAX + FM4 + `ppg-chord` (`ebm` bank): it boots, the waves sweep, envelopes and level are normal. The build is reproducible: the same inputs give the same SHA-256.
+**Hardware:** verified on a Syntakt (OS 1.41) with MAX + FM4 + `ppg-chord`, with both the `ebm` bank (the default) and the `ebm7` zone bank (with PPG tables): it boots, the waves sweep, envelopes and level are normal. The build is reproducible: the same inputs give the same SHA-256.
 
 ## Build and install (this fork)
 
@@ -73,10 +73,12 @@ With the default `ebm` bank and the mod list above, the SHA-256 is `64e84f9ace79
 
 ### 6. Check on the device
 
-On SY CHORD, use one note, an open filter and nothing modulating WAVE, and compare **WAVE 52** with **WAVE 0** (always the stock sine):
-- with the `ebm` bank, WAVE 52 is a thin, buzzy pulse;
-- a sine means the stock bank is still installed;
-- an organ means MAX's own bank is installed.
+On SY CHORD, use one note, an open filter and nothing modulating WAVE, and compare **WAVE 124** with **WAVE 0** (always the stock sine):
+- **sine-like:** the stock bank is still installed;
+- **a major-9 chord in one note:** MAX's own bank is installed;
+- **metallic FM (`ebm`) or a PPG wave (`ebm7`):** the new bank is installed.
+
+With `ebm`, WAVE 52 is also a quick check: a thin, buzzy pulse.
 
 More in [mods/ppg-chord](mods/ppg-chord#playing-it).
 

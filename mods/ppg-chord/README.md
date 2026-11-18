@@ -9,7 +9,7 @@ Puts **PPG-style wavetables** into SY CHORD's wave bank. Turning **WAVE** from 4
 | **Unchanged** | WAVE 0 (a sine shared with other machines), every other machine, the screen pictures (they still show the stock shapes) |
 | **Replaces** | MAX's *SY CHORD Wave Bank*: same region, so a build uses one or the other |
 | **Existing sounds** | those using SY CHORD with WAVE above 0 sound different |
-| **Status** | ✅ verified on hardware (`ebm` bank, Syntakt OS 1.41) |
+| **Status** | ✅ verified on hardware (`ebm` and `ebm7` banks, Syntakt OS 1.41) |
 
 Building and flashing the firmware: see the [main README](../../README.md#build-and-install-this-fork).
 
@@ -100,6 +100,7 @@ Compare **WAVE 52** with **WAVE 0**, which is always the stock sine. Use one not
 | stock | a pure sine, like WAVE 0 | sine-like |
 | MAX | Organ 1-2-4 | a major-9 chord in one note |
 | ppg-chord `ebm` | a thin, buzzy pulse | metallic FM |
+| ppg-chord `ebm7` | a vowel (vowel zone) | PPG wave (zone PPG 14) |
 
 ## Commands
 
@@ -146,6 +147,6 @@ The standalone `reso`, `sync` and `metal` tables keep their talking character.
 
 ## Status
 
-- ✅ **Hardware:** `ebm` bank verified on a Syntakt (OS 1.41, MAX + FM4 base): boots, the waves sweep, normal envelopes, good level.
+- ✅ **Hardware:** verified on a Syntakt (OS 1.41, MAX + FM4 base) with the `ebm` bank and the `ebm7` zone bank: boots, the waves sweep, normal envelopes, good level.
 - ✅ `tests/test_ppg_chord.py`: bank layout and format, compatibility with MAX's manifest, the tables' continuity and loudness, the PPG parsers, the curated selection, and the command line. With the stock OS in `firmware/`, it also plays the bank in the original engine (emulator).
 - ⬜ Windows modular builder: the *Local patch* option is in the source, but the packaged `.exe` must be rebuilt (`build_windows.ps1`), and the GUI has not been run.
