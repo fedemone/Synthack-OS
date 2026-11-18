@@ -15,15 +15,20 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("unicorn")
-from unicorn import UC_ARCH_M68K, UC_MODE_BIG_ENDIAN, Uc  # noqa: E402
+from unicorn import UC_ARCH_M68K, UC_HOOK_CODE, UC_MODE_BIG_ENDIAN, Uc  # noqa: E402
 from unicorn.m68k_const import (UC_CPU_M68K_ANY, UC_M68K_REG_A3, UC_M68K_REG_A7,  # noqa: E402
                                 UC_M68K_REG_D0, UC_M68K_REG_D1, UC_M68K_REG_D2, UC_M68K_REG_D3,
                                 UC_M68K_REG_SR)
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "tools" / "emu"), str(ROOT / "tools" / "unpack"), str(ROOT / "mods" / "master-comp")]
+sys.path[:0] = [str(ROOT / "tools" / "build"), str(ROOT / "tools" / "emu"), str(ROOT / "tools" / "unpack"), str(ROOT / "mods" / "master-comp")]
 import eft  # noqa: E402
+import modarea_layout  # noqa: E402
 from emac import UnicornEmac  # noqa: E402
+
+MA = modarea_layout.RAM                                    # area mod (mods/modarea)
+MA_PAGE, MA_MAP = 0x444E_0000, 0x2_0000                     # area mod e radice dell'interfaccia (0x444E1334)
+assert MA_PAGE <= MA and MA + modarea_layout.SIZE <= MA_PAGE + MA_MAP
 
 SY = ROOT / "firmware" / "Syntakt_OS1.41.syx"
 SPEC_F = ROOT / "mods" / "master-comp" / "patch.json"
@@ -34,11 +39,14 @@ HOOK, AFTER = 0x4009_053E, 0x4009_0562
 ADC_L, ADC_R = 0x8000_3C50, 0x8000_3CD0
 HW, STACK, RET = 0x5000_2000, 0x5001_0000, 0x5000_8000
 FX_SLOTS = 0x41B9_F950
+PROJECT_PTR, PROJECT, ACTIVE_TRACK = 0x444E_13F4, 0x5000_7000, 0x4001_FF74
+DRAW, DRAW_CONT = 0x4003_A244, 0x4003_A24C
 KIT_PTR, KIT, KIT_BLK = 0x8000_30BC, 0x5000_4000, 70
 GLOB_BLK, GLOBAL_FLAGS = 0x41B9_D3B0, 0x43BD_E444
 WOFF = {"THR": 12, "ATK": 14, "REL": 2, "MUP": 8}      # parole nel blocco esterno
 UI_ROOT, UI = 0x444E_1334, 0x5000_A000
-IDS = {"THR": 144, "ATK": 122, "REL": 91, "MUP": 101, "RAT": 127, "GR": 59, "COMP": 115}
+IDS = {"THR": 262, "ATK": 263, "REL": 264, "MUP": 265, "RAT": 266, "GR": 267, "COMP": 268}
+OLD_IDS = (144, 122, 91, 101, 127, 59, 115)               # alias dell'OS usati fino alla v0.8
 RAT_STEP = 0xFE0
 OBJS = 0x41B9_FA24
 GET, SET, KIT_FN = 0x4000_D94A, 0x4000_DA32, 0x4000_D870
@@ -58,17 +66,18 @@ class Machine:
         uc = self.uc = Uc(UC_ARCH_M68K, UC_MODE_BIG_ENDIAN, cpu=UC_CPU_M68K_ANY)
         uc.mem_map(0x4000_0000, 0x0040_0000)
         uc.mem_write(LOAD, sec3)
-        uc.mem_map(0x4600_0000, 0x1_0000)                      # area mod (dopo la rilocazione)
+        uc.mem_map(MA_PAGE, MA_MAP)                      # area mod (dopo la rilocazione)
         vp = json.loads((ROOT / "mods" / "vparams" / "patch.json").read_text(encoding="utf-8"))
         for p in spec["patches"] + vp["patches"]:          # i parametri virtuali passano da vparams
             dst = int(p["ram"], 16) if p.get("append") else int(p["addr"], 16)
             uc.mem_write(dst, bytes.fromhex(p["hex"]))
         uc.mem_map(0x8000_0000, 0x1_0000)
         uc.mem_map(0x5000_0000, 0x2_0000)
-        uc.mem_map(0x41B9_D000, 0x7000)                        # globale, pagine, oggetti (BSS)
-        uc.mem_map(0x43BD_E000, 0x1000)                        # bit global
-        uc.mem_map(0x444E_1000, 0x1000)                        # puntatore all'interfaccia
+        uc.mem_map(0x41B9_D000, 0xA000)                     # globale, pagine, oggetti (BSS, fino a id 268)
+        uc.mem_map(0x43BD_E000, 0x1000)                     # bit global
         uc.mem_write(FX_SLOTS, struct.pack(">8i", 0, 0, 0, 0, 0, 0, 0, 150))
+        uc.mem_write(PROJECT_PTR, struct.pack(">I", PROJECT))
+        uc.mem_write(ACTIVE_TRACK, bytes((0x70, 12, 0x4e, 0x75)))  # moveq #12,d0 ; rts
         uc.mem_write(KIT_PTR, struct.pack(">I", KIT if kit else 0))
         uc.mem_write(RET, b"\x4e\x75")
         self.emac = UnicornEmac(uc, [int(a, 16) for a in spec.get("emac_sites", [])])
@@ -288,16 +297,120 @@ def test_other_ids_resume_original_code_identically(setup, fn, resume):
     assert states[0] == states[1]
 
 
-def test_page_stub_sets_the_knobs_at_boot(setup):
+@pytest.mark.parametrize("fn,resume", [(GET, 0x4000_D950), (SET, 0x4000_DA3A)])
+def test_midi_ids_resume_native_get_set_without_compressor_dispatch(setup, fn, resume):
+    """IDs 262..268 remain native parameter routes when the selected page is MIDI."""
+    spec, sec3, _ = setup
+    states = []
+    for patched in (False, True):
+        m = Machine(spec if patched else {"patches": [], "emac_sites": []}, sec3)
+        # The stock selector is a tiny function in the fixture: choose a MIDI track.
+        m.uc.mem_write(ACTIVE_TRACK, bytes((0x70, 11, 0x4e, 0x75)))
+        m.uc.ctl_flush_tb()
+        m.call(fn, [0x5000_0100, 262, 0x4000, 1], resume)
+        sp = m.uc.reg_read(UC_M68K_REG_A7)
+        states.append((sp, bytes(m.uc.mem_read(sp, 32)), m.uc.reg_read(UC_M68K_REG_D1),
+                       m.uc.reg_read(UC_M68K_REG_D2), m.uc.reg_read(UC_M68K_REG_D3)))
+    assert states[0] == states[1]
+
+
+def set_active_track(m, spec, track):
+    m.uc.mem_write(ACTIVE_TRACK, bytes((0x70, track & 0xff, 0x4e, 0x75)))
+    m.uc.ctl_flush_tb()
+    return m.call(int(spec["symbols"]["comp_active_context"], 16), [])
+
+
+def test_fx_context_claims_the_knobs_without_a_boot_page_patch(setup):
     spec, sec3, _ = setup
     m = Machine(spec, sec3)
     m.uc.mem_write(FX_SLOTS, struct.pack(">8i", 0, 0, 0, 0, 0, 0, 0, 150))
-    m.uc.reg_write(UC_M68K_REG_D0, 0x1234)
-    m.call(int(spec["symbols"]["comp_page_stub"], 16), [])
-    assert list(struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))) == [144, 122, 91, 101, 127, 59, 115, 150]
-    assert m.uc.reg_read(UC_M68K_REG_D0) == 0x1234
+    assert set_active_track(m, spec, 12) == 1
+    assert list(struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))) == [*IDS.values(), 150]
     sec = {int(p["addr"], 16): p for p in spec["patches"] if not p.get("append")}
-    assert 0x4019_5156 in sec                                   # al posto dell'ultimo clr.l delle caselle
+    vp = json.loads((ROOT / "mods" / "vparams" / "patch.json").read_text(encoding="utf-8"))
+    vp_sec = {int(p["addr"], 16): p for p in vp["patches"] if not p.get("append")}
+    assert 0x4019_5156 not in sec
+    assert DRAW not in sec and DRAW in vp_sec
+
+
+def invoke_draw(m):
+    m.uc.ctl_flush_tb()
+    m.uc.mem_write(STACK - 4, struct.pack(">I", RET))
+    m.uc.reg_write(UC_M68K_REG_SR, 0x2700)
+    m.uc.reg_write(UC_M68K_REG_A7, STACK - 4)
+    m.uc.emu_start(DRAW, DRAW_CONT, count=100_000)
+    assert m.uc.reg_read(UC_M68K_REG_A7) == STACK - 4 - 80
+
+
+def test_midi_context_restores_native_compressor_ids_and_slots(setup):
+    """The MIDI page receives its exact stock descriptor/object/slot state back."""
+    spec, sec3, _ = setup
+    m = Machine(spec, sec3)
+    before = {}
+    for pos, ident in enumerate(IDS.values()):
+        desc = 0x4022_D59C + 52 * ident
+        obj = OBJS + 84 * ident
+        d = bytes((pos + i) & 0xff for i in range(52))
+        o = bytes((0x80 + pos + i) & 0xff for i in range(84))
+        m.uc.mem_write(desc, d)
+        m.uc.mem_write(obj, o)
+        before[desc] = d
+        before[obj] = o
+    slots = struct.pack(">8I", *(0x11110000 + i for i in range(8)))
+    m.uc.mem_write(FX_SLOTS, slots)
+
+    set_active_track(m, spec, 12)
+    assert bytes(m.uc.mem_read(FX_SLOTS, 32)) != slots
+    assert set_active_track(m, spec, 11) == 0
+    assert bytes(m.uc.mem_read(FX_SLOTS, 32)) == slots
+    for addr, original in before.items():
+        assert bytes(m.uc.mem_read(addr, len(original))) == original
+
+
+def test_draw_hook_claims_on_fx_and_restores_before_midi_draw(setup):
+    """The patched generic SourcePage prologue preserves its caller ABI and scopes ownership."""
+    spec, sec3, _ = setup
+    m = Machine(spec, sec3)
+    stock_slots = struct.pack(">8I", *(0x22220000 + i for i in range(8)))
+    m.uc.mem_write(FX_SLOTS, stock_slots)
+    for r, value in zip(REGS, range(0x71000000, 0x71000000 + len(REGS))):
+        m.uc.reg_write(r, value)
+    marks = [m.uc.reg_read(r) for r in REGS]
+
+    m.uc.mem_write(ACTIVE_TRACK, bytes((0x70, 12, 0x4e, 0x75)))
+    invoke_draw(m)
+    assert list(struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32)))[:7] == list(IDS.values())
+    assert [m.uc.reg_read(r) for r in REGS] == marks
+
+    m.uc.mem_write(ACTIVE_TRACK, bytes((0x70, 11, 0x4e, 0x75)))
+    invoke_draw(m)
+    assert bytes(m.uc.mem_read(FX_SLOTS, 32)) == stock_slots
+    assert [m.uc.reg_read(r) for r in REGS] == marks
+
+
+def test_shared_vparams_draw_scopes_compressor_and_beat_repeat_together(setup):
+    """The single draw hook claims both FX-only pages and restores both on MIDI."""
+    spec, sec3, _ = setup
+    m = Machine(spec, sec3)
+    br = json.loads((ROOT / "mods" / "beat-repeat" / "patch.json").read_text(encoding="utf-8"))
+    for patch in br["patches"]:
+        dst = int(patch["ram"], 16) if patch.get("append") else int(patch["addr"], 16)
+        m.uc.mem_write(dst, bytes.fromhex(patch["hex"]))
+
+    comp_slots = struct.pack(">8I", *(0x22220000 + i for i in range(8)))
+    trig_slots = struct.pack(">2I", 0x33330001, 0x33330002)
+    m.uc.mem_write(FX_SLOTS, comp_slots)
+    m.uc.mem_write(0x41B9_F924, trig_slots)
+
+    m.uc.mem_write(ACTIVE_TRACK, bytes((0x70, 12, 0x4e, 0x75)))
+    invoke_draw(m)
+    assert list(struct.unpack(">8I", m.uc.mem_read(FX_SLOTS, 32)))[:7] == list(IDS.values())
+    assert struct.unpack(">2I", m.uc.mem_read(0x41B9_F924, 8)) == (269, 124)
+
+    m.uc.mem_write(ACTIVE_TRACK, bytes((0x70, 11, 0x4e, 0x75)))
+    invoke_draw(m)
+    assert bytes(m.uc.mem_read(FX_SLOTS, 32)) == comp_slots
+    assert bytes(m.uc.mem_read(0x41B9_F924, 8)) == trig_slots
 
 
 def test_audio_block_leaves_the_page_alone(setup):
@@ -360,8 +473,8 @@ def test_meter_rises_fast_and_falls_slowly(setup):
 
 
 def comp_init(m, spec):
-    """All'avvio lo stub della pagina installa formattatori e disegno."""
-    m.call(int(spec["symbols"]["comp_page_stub"], 16), [])
+    """The active FX context installs the compressor view state on demand."""
+    assert set_active_track(m, spec, 12) == 1
 
 
 def test_init_copies_drive_knob_graphics(setup):
@@ -370,9 +483,9 @@ def test_init_copies_drive_knob_graphics(setup):
     drive = OBJS + 84 * 150 + 36
     m.uc.mem_write(drive, bytes(range(0xA0, 0xB0)))
     comp_init(m, spec)
-    for i in (144, 122, 91, 101):
-        assert bytes(m.uc.mem_read(OBJS + 84 * i + 36, 16)) == bytes(range(0xA0, 0xB0))
-    for i in (127, 59):                              # RAT e GR restano barre
+    for k in ("THR", "ATK", "REL", "MUP"):
+        assert bytes(m.uc.mem_read(OBJS + 84 * IDS[k] + 36, 16)) == bytes(range(0xA0, 0xB0))
+    for i in (IDS["RAT"], IDS["GR"]):                # RAT e GR restano barre
         assert bytes(m.uc.mem_read(OBJS + 84 * i + 36, 16)) == bytes(16)
 
 
@@ -502,4 +615,59 @@ def test_on_off_text_and_page_slot(setup):
     assert call_fmt(m, 0x100, "COMP") == "ON" and call_fmt(m, 0, "COMP") == "OFF"
     m.set("COMP", 0)
     m.block([0] * 32, [0] * 32, 1000, 1000)          # la casella resta nostra anche da spento
-    assert struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))[6] == 115
+    assert struct.unpack(">8i", m.uc.mem_read(FX_SLOTS, 32))[6] == IDS["COMP"]
+
+
+# ----------------------------------------------------------------------------- v0.8.1: id liberi
+def test_old_alias_ids_are_left_to_the_os(setup):
+    """59 (GAIN dei filtri EQ), 122 (REV del MIXER), 91/101 (SLEW), 127 (PAN): l'OS li usa come alias
+    sulle pagine; la mod non li registra e non tocca i loro descrittori."""
+    spec, sec3, _ = setup
+    table = [p for p in spec["patches"] if p.get("append") and "vparams[" in p.get("what", "")]
+    ids = {struct.unpack(">H", bytes.fromhex(p["hex"])[:2])[0] for p in table}
+    assert ids == set(IDS.values())
+    desc = 0x4022_D59C
+    for i in OLD_IDS:
+        lo, hi = desc + 52 * i, desc + 52 * i + 52
+        assert not any(lo < int(p["addr"], 16) + p["len"] and int(p["addr"], 16) < hi
+                       for p in spec["patches"] if not p.get("append")), i
+
+
+def test_init_sets_the_encoder_type_of_the_new_ids(setup):
+    spec, sec3, _ = setup
+    m = Machine(spec, sec3)
+    for i in IDS.values():
+        m.uc.mem_write(OBJS + 84 * i, struct.pack(">I", 1))         # MIDI-track type
+    comp_init(m, spec)
+    want = {"THR": 0, "ATK": 8, "REL": 0, "MUP": 0, "RAT": 8, "GR": 0, "COMP": 12}
+    for k, v in want.items():
+        assert struct.unpack(">I", m.uc.mem_read(OBJS + 84 * IDS[k], 4))[0] == v
+
+
+# ----------------------------------------------------------------------------- costo per blocco (v0.8.1)
+def block_cost(m, left, right):
+    n = [0]
+    m.uc.ctl_flush_tb()                                        # i blocchi gia' tradotti non vedrebbero il gancio
+    h = m.uc.hook_add(UC_HOOK_CODE, lambda *a: n.__setitem__(0, n[0] + 1))
+    m.block(left, right, 40000, 40000)
+    m.uc.hook_del(h)
+    return n[0]
+
+
+def test_cost_per_block(setup):
+    """Regressione sul carico (issue #2): il rilevatore per blocco costa una frazione di quello per campione
+    (~2 000 istruzioni fino alla v0.8.0). L'OS usa gia' ~89 % della CPU: ogni istruzione qui la toglie
+    all'interfaccia."""
+    spec, sec3, _ = setup
+    m = Machine(spec, sec3)
+    rnd = random.Random(3)
+    sig = list(signal(rnd, 4))
+    m.block(*sig[0], 40000, 40000)                             # costanti gia' calcolate
+    off = block_cost(m, *sig[1])
+    m.set("RAT", 4 * RAT_STEP)
+    m.block(*sig[1], 40000, 40000)                             # ricalcolo delle costanti (una volta)
+    on = max(block_cost(m, *s) for s in sig[2:])
+    noisy = [rnd.randrange(-2**31, 2**31) for _ in range(32)]  # ogni campione un nuovo picco o minimo
+    worst = block_cost(m, noisy, noisy)
+    assert off < 150, off
+    assert on < 650 and worst < 650, (on, worst)                # v0.8.0: ~2 000

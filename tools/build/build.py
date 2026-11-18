@@ -78,8 +78,26 @@ class Patch:
         return self.offset + len(self.data)
 
 
+MAX_MANIFEST = REPO / "tools" / "max" / "modular_builder" / "resources" / "modular-manifest.json"
+
+
+def mod_spec(moddir) -> dict:
+    """Specifica di una mod: mods/<nome>/patch.json, oppure "max:<nome>" per le mod che esistono
+    solo nel manifest del builder modulare di MAX (deja-vu, sy-chord, fm4, ...)."""
+    text = str(moddir)
+    if text.startswith("max:"):
+        name = text[4:]
+        manifest = json.loads(MAX_MANIFEST.read_text(encoding="utf-8"))
+        for mod in manifest["mods"]:
+            if mod["name"] == name:
+                return mod
+        raise BuildError(f"{text}: nel manifest di MAX non c'e' (ci sono: "
+                         f"{', '.join(m['name'] for m in manifest['mods'])})")
+    return json.loads((Path(moddir) / "patch.json").read_text(encoding="utf-8"))
+
+
 def load_mod(moddir: Path, os_version: str) -> list[Patch]:
-    spec = json.loads((Path(moddir) / "patch.json").read_text(encoding="utf-8"))
+    spec = mod_spec(moddir)
     name = spec["name"]
     if spec.get("os") != os_version:
         raise BuildError(f"{name}: scritta per OS {spec.get('os')}, non per {os_version}")
@@ -107,7 +125,7 @@ def load_mod(moddir: Path, os_version: str) -> list[Patch]:
 def mod_area(moddirs: list[Path]) -> dict | None:
     """Disposizione dell'area mod compressa, se una delle mod (modarea) la dichiara."""
     for d in moddirs:
-        lay = json.loads((Path(d) / "patch.json").read_text(encoding="utf-8")).get("layout", {})
+        lay = mod_spec(d).get("layout", {})
         if lay.get("compress") == "shlz":
             return {"img": int(lay["img"], 16), "size": int(lay["size"], 16)}
     return None
@@ -154,6 +172,19 @@ def apply_patches(sections: dict[int, bytearray], patches: list[Patch]) -> None:
         sec[p.offset:p.end] = p.data
 
 
+def check_selection(moddirs) -> None:
+    """Dipendenze ("requires") ed esclusioni ("conflicts", in entrambe le direzioni)."""
+    specs = [mod_spec(d) for d in moddirs]
+    names = {spec["name"] for spec in specs}
+    for spec in specs:
+        missing = set(spec.get("requires", [])) - names
+        if missing:
+            raise BuildError(f"{spec['name']}: richiede anche {sorted(missing)}")
+        clash = set(spec.get("conflicts", [])) & names
+        if clash:
+            raise BuildError(f"{spec['name']}: non va insieme a {sorted(clash)} (stessa parte del firmware)")
+
+
 def build(stock: Path, moddirs: list[Path], out: Path, log=print) -> dict:
     info = eft.info(stock)
     if "Syntakt" not in info.device or not info.checksums_ok:
@@ -161,12 +192,7 @@ def build(stock: Path, moddirs: list[Path], out: Path, log=print) -> dict:
     version = info.version
     if STOCK_SHA256.get(version) != sha256(Path(stock).read_bytes()):
         raise BuildError(f"{stock}: non e' l'OS stock {version} atteso (impronta diversa)")
-    names = {json.loads((Path(d) / "patch.json").read_text(encoding="utf-8"))["name"] for d in moddirs}
-    for d in moddirs:
-        spec = json.loads((Path(d) / "patch.json").read_text(encoding="utf-8"))
-        missing = set(spec.get("requires", [])) - names
-        if missing:
-            raise BuildError(f"{spec['name']}: richiede anche {sorted(missing)}")
+    check_selection(moddirs)
     patches = [p for d in moddirs for p in load_mod(d, version)]
     needed = sorted({p.section for p in patches})
 
@@ -234,7 +260,7 @@ def build(stock: Path, moddirs: list[Path], out: Path, log=print) -> dict:
     manifest = {
         "os": version,
         "stock_sha256": STOCK_SHA256[version],
-        "mods": [json.loads((Path(d) / "patch.json").read_text(encoding="utf-8"))["name"] for d in moddirs],
+        "mods": [mod_spec(d)["name"] for d in moddirs],
         "output": out.name,
         "output_sha256": sha256(out.read_bytes()),
         "boot_margin": margin,
@@ -246,7 +272,7 @@ def build(stock: Path, moddirs: list[Path], out: Path, log=print) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--stock", type=Path, required=True, help="OS stock scaricato da elektron.se")
-    ap.add_argument("mods", type=Path, nargs="+", help="cartelle mods/<nome>")
+    ap.add_argument("mods", nargs="+", help="cartelle mods/<nome>, oppure max:<nome> (mod del manifest di MAX)")
     ap.add_argument("-o", "--out", type=Path, required=True)
     a = ap.parse_args(argv)
     try:

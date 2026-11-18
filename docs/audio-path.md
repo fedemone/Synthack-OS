@@ -8,7 +8,7 @@ Blocks of **32 frames at 48 kHz** (0.67 ms).
 - Per block: copies `0x1B0` B of parameters from shared RAM, renders **8 digital voices** with `0x40004324`, sends 8 × 32 × int32 (1 KB) back via **eDMA ch. 47**. No mixing here.
 - 12 engines: tables at `0x400148F0` (render), `0x40014920` (update), `0x40014950` (machine ID → engine).
   0 BD MODERN · 1 SD BASIC · 2 CY ALLOY · 3 PC CARBON · 4 SY TONE · 5 SY CHORD · 6 SD VINTAGE · 7 CP VINTAGE · 8 SY TOY · 9 SY BITS · 10 SY SWARM · 11 SP TWINSHOT.
-- SY CHORD reads a 512 × int32 single-cycle wave at `0x4001A300`.
+- SY CHORD reads a **32-frame wave bank**, WAVE = 4 × frame, values in between interpolated. Frame 0 is a sine shared with other machines at `0x40054250`. Frames 1–31 are 257 × int32 each (256 samples + guard, peak `0x7FFF0000`, sample 0 = 0), stored in reverse: frame k at `0x4001E7FC − k·0x404`, bank `0x40016B80–0x4001E7FC`. Source: [syntakt-firmware-workbench](https://github.com/Bezronczek/syntakt-firmware-workbench) (MIT), measured on hardware. An earlier note here said "512 × int32 at `0x4001A300`": that address is inside frames 16–18.
 
 ## CPU #1 — mix and output (section 3)
 
@@ -55,7 +55,7 @@ Engine copy of the kit (or global) blocks, base `0x800021B0`, written by `0x400A
 - Everything above runs in the audio interrupt `0x400A3856` (`rte` at `0x400A54A8`), once per block. Free-running counter: DTIM0 `0xFC07000C`.
 - Measured on the device (interrupt entry/exit with DTIM0): **~89 % of the CPU at rest**, sequencer stopped. The UI only gets what is left: a few % more per block is enough to make it lag.
 - The DSPI wait at the start of the interrupt (`0x40102066`) is not idle time to reuse: the CV transfer (~500 frames of 16 bits at ~15.6 MHz, ~0.55 ms) starts early in the previous interrupt and is over before the next one.
-- Reference costs per block (instructions, emulator): reverb ~8 200; our master compressor 100 off / ~2 000 on; fx3 ~60 idle, with one track sending ~1 300 (chorus) … ~1 700 (phaser), ~2 300 worst case. How to keep an effect cheap: [modding guide](modding-guide.md#6-audio-processing).
+- Reference costs per block (instructions, emulator): reverb ~8 200; our master compressor 100 off / ~600 on (per-block detector, v0.8.1); fx3 ~60 idle, with one track sending ~1 300 (chorus) … ~1 700 (phaser), ~2 300 worst case. How to keep an effect cheap: [modding guide](modding-guide.md#6-audio-processing).
 
 ## Track parameters, envelopes and filters
 

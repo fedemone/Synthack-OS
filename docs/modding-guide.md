@@ -4,19 +4,21 @@ How the mods in this repository are built, and how to do the common things: hook
 
 ## 1. Workflow
 
-1. `mods/<name>/make_patch.py` compiles the code (GNU as or gcc for ColdFire, `-mcpu=54418`) and writes `patch.json`: for each change, the address, a SHA-256 of the original bytes and our bytes. Code larger than a few hundred bytes goes to the [mod area](../mods/modarea) (`"append": true`, linked at `0x46000000 + offset`).
+1. `mods/<name>/make_patch.py` compiles the code (GNU as or gcc for ColdFire, `-mcpu=54418`) and writes `patch.json`: for each change, the address, a SHA-256 of the original bytes and our bytes. Code larger than a few hundred bytes goes to the [mod area](../mods/modarea) (`"append": true`, linked at `modarea_layout.RAM + offset`, in the OS heap).
 2. `tests/test_<name>.py` loads the stock section 3 into Unicorn, applies the patch and runs the original code around it. EMAC instructions run in Python (`tools/emu/emac.py`): give it the list of EMAC sites of your code.
 3. `tools/build/build.py` checks every hash, overlaps and the boot decompression margin, and writes the `.syx`.
 4. Flash, test on the device, only then publish.
 
-Mod area (64 KB, unpacked at boot, zeroed beyond the code):
+Mod area (first 64 KB block of the OS heap, from `modarea_layout.RAM`; unpacked at boot, zeroed beyond the code):
 
 | Offset | Use |
 |---|---|
 | `+0x0000` | master-comp |
 | `+0x2000` | readable-values |
 | `+0x4000` | beat-repeat |
-| `+0x7E00` | vparams code; `+0x8000` vparams table (32 × 12 B) |
+| +0x6300 | scoped master-comp UI helper |
+| +0x6900 | scoped beat-repeat UI helper |
+| +0x7E00 | vparams code; +0x8000 vparams table (32 x 16 B) |
 | `+0xA000` | fx3 code and data; `+0xE000` fx3 delay line (4 KB) |
 
 Section 3 free fill `0x40338740–0x40339000`: splash, dual-mono, modarea loader (nearly full).
@@ -24,6 +26,7 @@ Section 3 free fill `0x40338740–0x40339000`: splash, dual-mono, modarea loader
 **Rules learned the hard way**
 
 - Never touch sections 2 and 6; never make the boot intro longer.
+- Never use the RAM above the BSS (`0x45565490–0x48000000`): no code refers to it, but the OS writes all over it when it loads samples ([#4](https://github.com/Angelo-politek/Synthack-OS/issues/4)). Memory for mods comes from the mod area, i.e. from the OS heap.
 - Keep the boot decompression margin (build fails under 4 KB). Zero padding is the worst case.
 - No `.bss` in mod code: put variables in `.data` (`__attribute__((section(".data")))`). The mod area is zeroed anyway, but the build checks.
 - No libgcc: `nm -u` must be empty. ColdFire has `divu.l`/`remu.l`, `ff1`, `mvs`/`mvz`, `sats` — GCC uses them.
@@ -37,24 +40,25 @@ A hook replaces ≥ 6 bytes of OS code with `jsr ours` (padded with `nop`), and 
 - Replaced `pea` pairs (arguments of the next call): pop the return address, push the arguments, `jmp` back (`fx3_mix_hook`).
 - Replaced `jsr f`: do your work, then `jmp f` with the stack untouched (`fx3_del_hook`).
 - Replaced EMAC instructions: replay them first (`fx3_trk_hook`). If your code uses EMAC, set `MACSR` yourself and leave `ACC0` at 0 (the OS sum routines start from it).
-- One-time setup at boot: hook an instruction of the page initializer (`0x401885D2…`), e.g. a `clr.l` that empties a page slot (`fx3_page_stub`, `comp_page_stub`). Objects built earlier in that initializer are ready.
+- If a descriptor is also a native MIDI parameter, scope ownership at a page/view boundary and restore captured native state when leaving that context.
 
 ## 3. Parameters
 
-Logical id → descriptor (`0x4022D59C + 52·id`: group, internal id, min/max/default, MIDI, names at +40/+48). Hidden ids (no page, no MIDI) can be reused: see the table in [ui-parameters](ui-parameters.md#hidden-ids-used-by-the-mods). Patch min/max/default and the name pointers in the descriptor to make the id yours.
+Logical id → descriptor (`0x4022D59C + 52·id`: group, internal id, min/max/default, MIDI, names at +40/+48). An id without a page or a MIDI CC is not necessarily free: if another descriptor has the same group and internal id, it is an **alias** that the OS can put on a page in some modes (#3). `tests/test_id_audit.py` rejects aliases, MIDI CC/NRPN and ids shared between mods; ids in use are listed in [ui-parameters](ui-parameters.md#hidden-ids-used-by-the-mods). Patch min/max/default and the name pointers in the descriptor to make the id yours.
 
-**Virtual parameters** ([vparams](../mods/vparams)): register `{id, get, set}` in the table and the three kit functions (is-kit, get, set) call your functions for that id. Values are 0…0x7F00 (127 × 256). `set` must request a redraw: `*(*0x444E1334 + 96) = 1`.
+**Virtual parameters** ([vparams](../mods/vparams)): register an id, getter, setter, and optional context guard. The three kit functions call a virtual handler only when its guard accepts the active context; the shared SourcePage boundary runs guards before drawing so they can restore native descriptor ownership outside their page. Values are 0..0x7F00. Setters must request a redraw.
 
 **Saving.** Two kinds of spare storage, both saved by the OS without knowing:
 
 - **Per track**: engine word +106 (internal id 39, hidden id 72 "amp delay time") is saved per track and p-lockable. fx3 uses it for SND3 (a real OS parameter: only its descriptor and page slot change).
 - **Per kit (pattern)**: `*0x800030BC` is the pattern kit = the FX track's parameters, one word per internal id (offset = 2 × id, 142 B). Words with no use: ids 0, 0x1A, 0x24, 0x27, 0x29, 0x2A, 0x37, 0x46 and 0x38 (hidden id 144). master-comp uses 0x24/0x27/0x29/0x2A, fx3 0/0x1A/0x38/0x46, beat-repeat 0x37: **all taken**. Store values **XOR their default**, so old projects (zero words) load with defaults. Read the word on every use (pattern changes swap the kit); fall back to RAM while the pointer is 0. With *global* FX blocks the OS uses a container at `0x41B9D3B0` instead (master-comp follows the SYN flag).
+- **Kit on storage** (FUNC+YES/NO, project save): the FX block goes through a position table that drops words 0x1A and 0x46 and reads word 0 back from 0x1A. fx3 keeps those three words in 8 reserved bytes of the stored block (hooks at `0x400A6D96` / `0x400A6D2E`). Any new kit word must survive the round trip tested in `tests/test_fx3.py`.
 
 ## 4. Pages and tabs
 
 - **Page objects** live in BSS (array at `0x41B9F3C8`, 44 B each): names and 8 slot ids. Slots are read at draw time: write a slot to move a parameter, write 0 to empty it (fx3 hides the crusher's unused knobs this way, `SLOTS[4..5]`).
 - **AMP pages** (track), first slot (A) of each variant: page 1 `0x41B9F60C` (AHD envelope) / `0x41B9F638` (ADSR), page 2 `0x41B9F664` / `0x41B9F690`; 4 B per slot. fx3 puts SND3 in slot G of page 1 (`0x41B9F624`, `0x41B9F650`) and PAN in slot E of page 2 (`0x41B9F674`, `0x41B9F6A0`), from a stub at the end of the AMP pages in the initializer (`0x40194A50`).
-- **Tabs** are built from constant arrays of page indices plus a count, e.g. REVERB `{21}` (count at `0x4003588C`, array pointer at `0x40035892`). To add a page: point the array to your own `{21, 25}` and set the count to 2 — the tab key then cycles the pages. Page 25 ("OB8") is a Digitakt leftover, free.
+- **Tabs** are built from constant arrays of page indices plus a count, e.g. REVERB `{21}` (count at `0x4003588C`, array pointer at `0x40035892`). To add a page: point the array to your own `{21, 25}` and set the count to 2 — the tab key then cycles the pages. Page 25 ("OB8") is a stock page, not a globally free allocation. A mod that borrows it must scope and restore its UI ownership.
 - **Tab classes** can draw slots their own way: the DELAY/REVERB class draws slots 5–6 as one filter box (fx3 sends page 25 to the generic 8-slot draw `0x4003A244`); the AMP class draws ids 73–77 and unknown ids as the envelope (a patched branch at `0x40041E84` lets id 72 draw normally).
 - Page names: pointers in the initializer (`fx3` patches two `pea`); to rename at runtime, point them to a RAM buffer and rewrite it.
 

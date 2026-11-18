@@ -1,11 +1,11 @@
 """Mod fx3: costruisce patch.json da fx3.c (terza mandata effetti: chorus, flanger, phaser, crusher).
 
-- compila fx3.c per ColdFire e lo collega nell'area mod a 0x4600A000 (tabelle generate qui);
+- compila fx3.c per ColdFire e lo collega nell'area mod a +0xA000 (tabelle generate qui);
 - aggancia la funzione di mix a blocchi: ciclo per traccia (0x4008F3A0), delay (0x4008F828: mandata
   del chorus verso il delay), somme del master (0x4008FB04: bus 3, chorus a 24 kHz e ritorno);
 - SND3 = id 72 (nascosto, salvato per traccia) nella pagina AMP 1 accanto a DEL e REV (PAN in pagina 2);
-- pagina FX3 = pagina 25 dell'OS ("OB8", inutilizzata) come seconda pagina del tab REVERB, con gli id
-  nascosti delle tracce MIDI 246..253 tramite vparams; valori salvati nel kit del pattern.
+- pagina FX3 = pagina 25 dell'OS ("OB8 / Outbox 8") come seconda pagina del tab REVERB. Gli id
+  246..253 sono descrittori MIDI reali: vparams e la UI li acquisiscono solo nel contesto FX e li rilasciano altrove; valori salvati nel kit del pattern.
 """
 
 from __future__ import annotations
@@ -24,18 +24,19 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-sys.path.insert(0, str(REPO / "tools" / "unpack"))
+sys.path[:0] = [str(REPO / "tools" / "unpack"), str(REPO / "tools" / "build")]
 import eft  # noqa: E402
+import modarea_layout  # noqa: E402
 
 _vp = importlib.util.spec_from_file_location("vparams_make_patch", REPO / "mods" / "vparams" / "make_patch.py")
 vparams = importlib.util.module_from_spec(_vp)
 _vp.loader.exec_module(vparams)
 
 LOAD = 0x4000_0400
-MODAREA_RAM, MODAREA_IMG = 0x4600_0000, 0x4034_8000
+MODAREA_RAM, MODAREA_IMG = modarea_layout.RAM, modarea_layout.IMG
 CODE_BASE, CODE_END = MODAREA_RAM + 0xA000, MODAREA_RAM + 0xDFF0   # retroazione a +0xDFFC, linea a +0xE000 (4 KB)
 TOOLS = "~/tools/m68k/root"
-CFLAGS = "-mcpu=54418 -O2 -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-common -Wall -Wextra"
+CFLAGS = f"-DMODAREA_RAM={modarea_layout.RAM:#x}u -mcpu=54418 -O2 -ffreestanding -fno-builtin -nostdlib -fno-pic -fno-common -Wall -Wextra"
 FS = 24000                              # il chorus lavora a 24 kHz
 DESC = 0x4022_D59C
 P_PLAIN, G_KNOB, G_SEND, S_BAR = 0x41B9_DFD0, 0x41B9_DCD0, 0x41B9_DBD0, 0x41B9_D5D0
@@ -46,7 +47,6 @@ HOOKS = [  # (indirizzo, byte originali, simbolo, jsr/jmp, riempimento con nop)
     (0x4008_F828, "4eb940096890", "fx3_del_hook", "delay: jsr fx3_del_hook (mandata del chorus al delay)"),
     (0x4008_FB04, "486efed848798000e0f0", "fx3_mix_hook",
      "somme del master: jsr fx3_mix_hook (bus 3, chorus, ritorno) ; nop ; nop"),
-    (0x4019_4E2A, "42b941b9f83c", "fx3_page_stub", "pagina 25 (FX3): caselle all'avvio"),
     (0x4019_4A50, "42b941b9f6a0", "fx3_amp_stub", "pagine AMP: SND3 (72) in G della pagina 1, PAN (80) in E della pagina 2"),
 ]
 # tab REVERB: vettore delle pagine {21} -> {21, 25}; nomi della pagina 25
@@ -55,6 +55,9 @@ PAGE_NAMES = [(0x4019_4D96, "4024e947", "fx3_page_s", "pagina 25: nome breve"),
               (0x4019_4DDC, "40251b03", "fx3_page_l", "pagina 25: nome lungo")]
 NO_STYLE = 0x41B9_FA68                 # +68 dell'id 0: std::function vuota (nessuno stile, come LFO MODE)
 DRAW_HOOK, DRAW_ORIG = 0x4004_2CE0, "4fefffa048d77cfc"  # disegno dei tab DELAY/REVERB (caselle 5-6 = filtro)
+# blocco della FX track del kit nel file: scrittura e lettura (le parole 0, 0x1A e 0x46 si perdevano)
+KIT_HOOKS = [(0x400A_6D96, "2f0b2f0a246f000c", "fx3_kser_hook", "kit -> file (FX track): jmp fx3_kser_hook ; nop"),
+             (0x400A_6D2E, "4feffff448d71c00", "fx3_kdes_hook", "file -> kit (FX track): jmp fx3_kdes_hook ; nop")]
 # classe del tab AMP: gli id sotto 73 (diversi da 73-74) erano trattati come parti dell'inviluppo, senza
 # grafica propria; con bra -> "casella normale" SND3 (72) disegna la sua icona
 AMP_FIX = (0x4004_1E84, "605c", "6058")
@@ -135,10 +138,10 @@ def names() -> str:
     """Nomi in RAM (il tipo li riscrive): i descrittori puntano qui."""
     out = "".join(f'char fx3_n{i}_s[6] DATA = "{s}";\nchar fx3_n{i}_l[20] DATA = "{ln}";\n'
                   for i, (_, s, ln, *_r) in enumerate(PARAMS))
-    return out + 'char fx3_page_l[12] DATA = "Chorus";\n'
+    return out
 
 
-def build_blob() -> tuple[bytes, dict[str, int], str]:
+def build_blob(sec3: bytes) -> tuple[bytes, dict[str, int], str]:
     with tempfile.TemporaryDirectory(prefix="fx3-") as tmp:
         tmp = Path(tmp)
         shutil.copy(HERE / "fx3.c", tmp / "fx3.c")
@@ -172,7 +175,7 @@ def build_blob() -> tuple[bytes, dict[str, int], str]:
 def main() -> None:
     stock = REPO / "firmware" / "Syntakt_OS1.41.syx"
     sec3 = eft.unpack(stock, REPO / "unpacked" / stock.stem, ids=[3])[3].read_bytes()
-    blob, syms, dis = build_blob()
+    blob, syms, dis = build_blob(sec3)
     if CODE_BASE + len(blob) > CODE_END:
         raise SystemExit(f"non ci sta: {len(blob)} B")
     emac = [int(m[1], 16) for m in re.finditer(r"^\s*([0-9a-f]+):\s+(?:[0-9a-f]{4} ?)+\s+(\S+)\s*(.*)$", dis, re.M)
@@ -200,6 +203,8 @@ def main() -> None:
     patches.append(fixed(REVERB_ARRAY, long(syms["fx3_reverb_pages"]), "tab REVERB: pagine {21, 25}", "401c7fa8"))
     for addr, orig, sym, what in PAGE_NAMES:
         patches.append(fixed(addr, long(syms[sym]), what, orig))
+    for addr, orig, sym, what in KIT_HOOKS:
+        patches.append(fixed(addr, struct.pack(">HI", 0x4EF9, syms[sym]) + bytes.fromhex("4e71"), what, orig))
     patches.append(fixed(DRAW_HOOK, struct.pack(">HI", 0x4EF9, syms["fx3_draw_hook"]) + bytes.fromhex("4e71"),
                          "tab DELAY/REVERB: pagina 25 col disegno generico a 8 caselle", DRAW_ORIG))
     patches.append(fixed(AMP_FIX[0], bytes.fromhex(AMP_FIX[2]), "tab AMP: SND3 (72) come casella normale",
@@ -215,25 +220,20 @@ def main() -> None:
     # pagina FX3
     for n, (pid, short, ln, mx, df, protos, extra) in enumerate(PARAMS):
         r = DESC + 52 * pid
-        patches.append(vparams.entry(VP_SLOT + n, pid, syms["fx3_get"], syms["fx3_set"], f"fx3 {short}"))
-        patches += [fixed(r + 8, struct.pack(">III", 0, mx << 8, df << 8), f"id {pid} -> {short}: min, max, default"),
-                    fixed(r + 40, long(syms[f"fx3_n{n}_l"]), f"id {pid}: nome lungo '{ln}'"),
-                    fixed(r + 48, long(syms[f"fx3_n{n}_s"]), f"id {pid}: nome breve '{short}'")]
-        for off, (addr, orig, new) in protos.items():
-            patches.append(fixed(addr, long(resolve(new)), f"id {pid} +{off}: {resolve(new):#010x}", f"{orig:08x}"))
-        for addr, orig, new in extra:
-            patches.append(fixed(addr, bytes.fromhex(new), f"id {pid}: campo dell'oggetto come DEL (250)", orig))
+        patches.append(vparams.entry(VP_SLOT + n, pid, syms["fx3_get"], syms["fx3_set"],
+                                      f"fx3 {short}", syms["fx3_active_context"]))
     spec = {
         "name": "fx3", "os": "1.41", "requires": ["modarea", "vparams"],
         "description": "Terza mandata effetti: SND3 per traccia (pagina AMP 2) verso un chorus stereo; "
                        "regolazioni e livello di ritorno sulla pagina 2 del tab REVERB.",
         "generated_by": "mods/fx3/make_patch.py",
         "symbols": {k: f"{syms[k]:#010x}" for k in (
-            "fx3_trk_hook", "fx3_del_hook", "fx3_macsr", "fx3_mix_hook", "fx3_page_stub", "fx3_amp_stub",
-            "fx3_run", "fx3_dsnd", "fx3_ret", "fx3_get", "fx3_set", "fx3_p", "fx3_tgt", "fx3_cur", "fx3_moving",
+            "fx3_trk_hook", "fx3_del_hook", "fx3_macsr", "fx3_mix_hook", "fx3_amp_stub",
+            "fx3_run", "fx3_dsnd", "fx3_ret", "fx3_get", "fx3_set", "fx3_active_context", "fx3_p", "fx3_tgt", "fx3_cur", "fx3_moving",
             "fx3_bus", "fx3_wet", "fx3_idle", "fx3_reverb_pages", "fx3_fmt_spd", "fx3_fmt_del", "fx3_fmt_dep",
             "fx3_fmt_type", "fx3_fmt_fdbk", "fx3_fmt_wid", "fx3_fmt_vol", "fx3_type_gfx",
-            "fx3_draw_hook", "fx3_mgr", "fx3_phs", "fx3_n1_s", "fx3_n3_s", "fx3_n3_l", "fx3_page_l")},
+            "fx3_draw_hook", "fx3_mgr", "fx3_phs", "fx3_n1_s", "fx3_n3_s", "fx3_n3_l", "fx3_page_l",
+            "fx3_kser_hook", "fx3_kdes_hook")},
         "emac_sites": [f"{x:#010x}" for x in allowed],
         "patches": patches,
     }
